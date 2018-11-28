@@ -1,0 +1,18 @@
+Logfile for annotate_rnp.py 2017-11-24 14:13:13
+
+
+==============================================================================
+Script arguments:
+--------------------------------------------------------------------------------
+matches_sep: ;
+outfile_suffix: None
+strict_sw: True
+matches_column: Majority Protein IDs
+fasta_db: ./Input/Human_201701.fasta
+pep_column: Sequence
+outfile: dLOPIT_22plex_PeptideGroups_reannot.txt
+fasta_crap_db: Input/cRAP_FullIdentifiers.fasta
+logfile: adding_master_proteins.log
+infile: ['../../00_G_Publications/NucleolarRBPs/Conrad/proteinGroups_Nuc_Cyto.txt']
+==============================================================================
+

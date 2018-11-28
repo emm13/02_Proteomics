@@ -1,0 +1,721 @@
+---
+title: "Analysing the first set of TMT-tagged data for Trizol-based UV dosage experiments"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document: default
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12,fig.height=8,warning=FALSE, message=FALSE)
+#tidy.opts=list(width.cutoff=80)
+```
+
+```{r A_Startup, hide=T,warning=FALSE, message=FALSE}
+#---------------------------------------------------------------------------
+# Author 	      : Manasa Ramakrishna, mr325@le.ac.uk
+# Date started 	: 4th August, 2017
+# Last modified : 4th August, 2017
+# Aim 		      : To take a look at first SILAC labelled LOPIT data on Trizol
+# Depends       : On 'silacFunctions.R'. Make sure they are in the same directory
+# Notes         : Works on data from Rayner's first experiments
+#--------------------------------------------------------------------------- 
+
+
+# Invoking libraries
+library(MSnbase)
+library(gplots)
+library(reshape2)
+library(VIM)
+library(zoo) 
+library(spatstat) # "im" function 
+library(ggbiplot)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library("biomaRt")
+library(goseq)
+library(limma)
+library(ggplot2)
+
+library(outliers)
+library(RColorBrewer)
+library(stringr)
+
+#Setting working directories
+wd = "/Users/manasa/Documents/Work/TTT/ThreeTs/proteomics/oligodT/"
+setwd(wd)
+getwd()
+
+indir = paste(wd,"Input",sep="/")
+outdir = paste(wd,paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+
+```
+Now that we have loaded all the packages we need for working with this data, let's move on to the data. 
+
+```{r 00_ReadingData}
+
+# -----------------------------------------------
+# Step 00: Read data
+# Read in all the data required for analysis
+# -----------------------------------------------
+
+# File of contaminants - proteins to exclude from analysis as are things like keratin, alcohol dehydrogenase etc....
+contam = read.delim("Input/Common contaminant_all.csv",sep=",",header=T)
+
+# Read in the sample file that matches columns to sample contents
+samp.dat = read.delim("Input/samples.txt",sep="\t",header=T)
+
+# Read in the data files that contain peptide level output from Proteome discoverer...
+# Note: The columns that begin with "Found.in.Sample.in" correspond to various samples in the study.
+# Columns of interest are "sequence", "modifications","master.protein.accessions","abundance","quan.info"
+data = read.delim("Input/Dosages_4step-Trizol_PeptideGroups.txt",sep="\t",comment.char="",as.is=T,header=T)
+
+# Subset data to only keep columns of interest
+prot.data = data[,c(1:6,10:14,17,42:51,62)]
+
+# Rename tmt tagged columns with UV dosage names
+for(i in 1:nrow(samp.dat)){
+  id = grep(samp.dat$TMT[i],colnames(prot.data))
+  colnames(prot.data)[id] = paste(samp.dat$Sample[i])
+}
+dim(prot.data)
+head(prot.data)
+```
+data has 23 columns and 14456 rows - each row belonging to a peptide abundance value across all 10 samples. We now go through a series of filtering steps to obtain a dataset we can use for downstream analyses. 
+
+
+```{r 01_Filtering_1}
+
+# ---------------------------------------------------------------------------------
+# Step 01 : Filter 
+# We perform 3 layers of filtering - unique proteins, contaminants,missing values
+# ---------------------------------------------------------------------------------
+
+# Step 1a : Filter only for those peptides that have a unique master protein. Done using column "quan.info" and titled 'Unique'
+peptide.stats = table(prot.data$Quan.Info)
+peptide.stats
+
+filt.1a = prot.data[which(prot.data$Quan.Info == "Unique"),]
+dim(filt.1a) #12301 are unique peptides, 715 are non-unique and 1440 are missing values 
+
+# Step 1b : Filter out those proteins that are contaminants from the contaminants list and annotate missing values
+filt.1b = filt.1a[-which(filt.1a$Master.Protein.Accessions %in% contam$Protein.Group.Accessions),]
+num.contams = length(which(filt.1a$Master.Protein.Accessions %in% contam$Protein.Group.Accessions))
+
+dim(filt.1a) # 12301 in total
+dim(filt.1b) # 12077 filtered proteins
+print(num.contams) # 224 contaminant proteins
+
+# Adding extra information about rows with missing values
+filt.1b$count.missing = rowSums(is.na(filt.1b[,c(13:22)]))
+
+filt.1b$Missing = FALSE
+filt.1b$Missing[which(filt.1b$count.missing > 0)] = TRUE
+
+head(filt.1b)
+
+```
+We have a column called "Missing" to identify which peptides have one or more missing values across the 10 samples. "count.missing" tells us how many missing values there are for that peptide.
+
+
+```{r 02a_Creating-an-MSnSet}
+
+# ---------------------------------------------------------------------------------
+# Step 02a : Creating an MSnSet which is needed for using the MSnbase backage
+# ---------------------------------------------------------------------------------
+
+# The rownames of samp.dat have to be the same as column names in the expression data matrix
+rownames(samp.dat) = samp.dat$Sample
+
+# Create an MSnSet object
+res <- MSnSet(exprs = as.matrix(filt.1b[,c(13:22)]),fData=filt.1b[,c(10,1:9,12,23:25)],pData = samp.dat[,c(2,1)])
+res <- res[rowSums(is.na(exprs(res)))!=10,] # exclude  peptides without any quantification
+print(res)
+
+# How many missing values per peptide
+table(fData(res)$count.missing)
+colSums(is.na(exprs(res)))
+table(rowSums(is.na(exprs(res))))
+
+# Checking missing values
+table(is.na(res))
+```
+The MSnSet object has been created to include protein abundance values, some metadata and sample information (UV dosage in this case)
+
+```{r 02b_Imputing-missing-values}
+
+# ---------------------------------------------------------------------------------
+# Step 02b : Imputing missing values in the protein expression data using 'impute'
+# ---------------------------------------------------------------------------------
+
+# Subsetting only those peptides with one or more missing values
+# Replacing missing values with 0 and non-missing with 1
+# Displaying missing values
+
+miss.many = res[rowSums(is.na(exprs(res)))>=1,]
+exprs(miss.many)[exprs(miss.many) != 0] = 1
+exprs(miss.many)[is.na(exprs(miss.many))] = 0
+
+heatmap.2(exprs(miss.many), col = c("lightgray", "black"),
+            scale = "none", dendrogram = "none",
+            trace = "none", keysize = 0.5, key = FALSE,Colv=F,
+            ColSideColors = rep(c("steelblue", "darkolivegreen","magenta","black"), times = c(3,3,3,1)))
+
+# Impute missing values 
+impute.res <- impute(res,method = "knn")
+pData(impute.res)$Sample = gsub('\\s+','',pData(impute.res)$Sample)
+
+# Plot imputed values 
+res.miss = melt(exprs(res))
+colnames(res.miss) = c("Row","Dosage","Abundance_imp")
+res.no.miss = melt(exprs(impute.res))
+colnames(res.no.miss) = c("Row","Dosage","Abundance")
+
+imp.vals = res.no.miss[which(is.na(res.miss$Abundance_imp)),]
+
+# Some boxplots of the data
+#---------------------------
+
+# All data including missing values
+boxplot(log2(res.miss$Abundance)~as.factor(res.miss$Dosage),las=2,col=rep(c("turquoise", "salmon","palegreen","plum1"),times=c(3,3,3,1)),main="All data including missing values")
+
+# Imputed values/missing values only
+b.imp = boxplot(log2(imp.vals$Abundance)~imp.vals$Dosage,las=2,col=rep(c("turquoise", "salmon","palegreen","plum1"),times=c(3,3,3,1)),main="Imputed values only")
+boxplot(log2(imp.vals$Abundance)~imp.vals$Dosage,las=2,names = paste(b.imp$names," (n=", b.imp$n, ")",sep=""),col=rep(c("turquoise", "salmon","palegreen","plum1"),times=c(3,3,3,1)),main="Imputed values only",,cex.axis = 0.6)
+
+# All data icluding newly imputed values
+boxplot(log2(res.no.miss$Abundance)~as.factor(res.no.miss$Dosage),las=2,col=rep(c("turquoise", "salmon","palegreen","plum1"),times=c(3,3,3,1)),main="All data with imputed values")
+
+# Additional plots showing fraction of missing values
+# Not much use as in our case, it is very small. 
+
+vim.dat = data.frame(cbind(Abundance_imp=res.miss$Abundance_imp,Abundance=res.no.miss$Abundance),stringsAsFactors = F)
+
+head(vim.dat)
+vim.dat$which.miss = FALSE
+vim.dat$which.miss[which(is.na(vim.dat$Abundance_imp))] = TRUE
+table(vim.dat$which.miss)
+
+histMiss(vim.dat, only.miss = F)
+pbox(vim.dat, ylim=c(0,500),selection="none")
+matrixplot(vim.dat)
+
+```
+We have a small number of missing values - 793 peptides have one or more missing values out of 12244 peptides in total. 551/793 are missing in 1 sample only and 38/793 in 2 samples. Only 2 peptides are missing in 9/10 samples.
+
+```{r 03_Normalisation}
+
+# ---------------------------------------------------------------------------------
+# Step 03 : Normalising imputed data using various methods to determine ideal one
+# ---------------------------------------------------------------------------------
+
+qnt.max <- normalise(impute.res, "max")
+qnt.sum <- normalise(impute.res, "sum")
+qnt.quant <- normalise(impute.res, "quantiles")
+qnt.qrob <- normalise(impute.res, "quantiles.robust")
+qnt.vsn <- normalise(impute.res, "vsn")
+
+## ---- plotting function---------
+.plot <- function(x,ttl=NULL) {
+  boxplot(exprs(x),
+          main=ifelse(is.null(ttl),processingData(x)@processing[2],ttl),
+          cex.main=1.5,
+          cex.lab=.5,
+          cex.axis=0.8,
+          cex=.8,
+          las=2)
+  grid()
+}
+
+# Using the plotting function to plot boxplots for all diff types of normalisation methods
+oldmar <- par()$mar
+par(mfrow=c(3,2),mar=c(2.9,2.9,2.9,1))
+.plot(impute.res, ttl = "Non-normalised data")
+.plot(qnt.max, ttl = "Maximum")
+.plot(qnt.sum, ttl = "Sum")
+.plot(qnt.quant, ttl = "Quantile")
+.plot(qnt.qrob, ttl = "Robust quantile")
+.plot(qnt.vsn, ttl = "vsn")
+
+# Checking the effects of normalisation on covariance
+sd1 <- apply(log2(exprs(impute.res))+10,1,sd)
+mn1 <- apply(log2(exprs(impute.res))+10,1,mean)
+cv1 <- sd1/mn1
+sd2 <- apply(exprs(qnt.vsn)+10,1,sd)
+mn2 <- apply(exprs(qnt.vsn)+10,1,mean)
+cv2 <- sd2/mn2
+dfr <- rbind(data.frame(rank=order(mn1),cv=cv1,norm="raw"),
+             data.frame(rank=order(mn2),cv=cv2,norm="vsn"))
+
+rmed1 <- rollapply(cv1,7,function(x) median(x,na.rm=TRUE))
+rmed2 <- rollapply(cv2,7,function(x) median(x,na.rm=TRUE))
+dfr2 <- rbind(data.frame(x=seq(0,30,by=30/length(rmed1))[-1],y=rmed1,norm="raw"),data.frame(x=seq(0,30,by=30/length(rmed2))[-1],y=rmed2,norm="vsn"))
+
+p <- ggplot()+geom_line(data=dfr2,aes(x=x,y=y,col=norm)) + theme_gray(7)
+plot(p)
+```
+Will keep the data from the vsn normalisation for downstream analyses as it normalises the data better than other methods used in this comparison such as "sum", "max", "quantile". 
+
+For all further steps, we will use the object "qnt.vsn"
+
+```{r 04a_Aggregate-to-proteins}
+
+# ---------------------------------------------------------------------------------
+# Step 04a : Aggregate peptide data to protein expression values
+# There is an in-built function called 'combineFeatures' to do thi within MSnBase
+# ---------------------------------------------------------------------------------
+
+protnames <- fData(qnt.vsn)$Master.Protein.Accessions
+#table(protnames)
+length(unique(protnames)) # 1744 proteins present in all 10 samples
+
+# Aggregating peptide abundance values into protein abundance values
+qnt.prot <- combineFeatures(qnt.vsn, groupBy = protnames, fun = "median")
+dim(qnt.prot)
+
+head(exprs(qnt.prot))
+head(exprs(qnt.vsn))
+
+# Basic plots of protein data across samples
+.plot(qnt.prot,ttl="Aggregated-proteins")
+plot(hclust(dist(exprs(t(qnt.prot)))))
+
+# Looking at sample correlations
+cor.prot = cor(exprs(qnt.prot))
+heatmap(cor.prot,cex.main = 0.8)
+
+dissimilarity <- 1 - cor.prot
+distance <- as.dist(dissimilarity)
+plot(hclust(distance))
+
+pairs(x = exprs(qnt.prot), upper.panel=NULL, pch=20)
+
+# Using the "duplicatecorrelation" function in limma to test correlation between technical replicates
+
+# If Rayner's ordering is correct, then the samples are
+biolrep.rq <- c(1,1,1,2,2,2,3,3,3,4)
+
+# If there is a swap between Pool.1 and 275mj.rep1, then it should be
+biolrep.swap <- c(1,1,1,4,2,2,3,3,3,2)
+
+# If it is indeed a swap, then the correlation should increase when corrected. It does!
+rq.cor = duplicateCorrelation(qnt.prot,ndups=1,block=biolrep.rq)$consensus.correlation # 0.203
+swap.cor = duplicateCorrelation(qnt.prot,ndups=1,block=biolrep.swap)$consensus.correlation # 0.564
+
+rq.cor
+swap.cor
+
+cor.prot
+
+#duplicateCorrelation(qnt.prot[,1:9],ndups=1,block=c(1,1,1,2,2,2,3,3,3))$consensus.correlation # 0.23
+#duplicateCorrelation(qnt.prot[,c(1:3,5:10)],ndups=1,block=c(1,1,1,2,2,3,3,3,2))$consensus.correlation # 0.37
+
+```
+We have merged the peptides into proteins and are looking here at the correlations within replicates of UV dosage. Replicate 3 of 150mJ dosage is a bit off from the other two while replicate 1 of 275mJ sits by itself allowing the "Pool" sample to cluster with the other 275mJ samples. 
+
+I thought that 275mJ.3 and Pool might have been swapped. So the various plots were done to prove whether or not this was true. The "duplicateCorrelation" function yields a much higher correlation when we assume that 275mJ.3 is swapped with Pool.1 than if we didn't. 
+
+Looking at th correlation values, 275.mJ vs Pool is more correlated than 150mJ vs Pool and 400mJ vs Pool. This could be becuase there was more material from sample 275mJ going into the pool. Rayner used the same volume of each of the 9 samples rather than same amount in the pool. Hence the higher correlation (well at least it is my best guess). 
+
+```{r 04b_Plotting-PCAs }
+
+# ---------------------------------------------------------------------------------
+# Step 04a : Plotting PCAs 
+# This is to look at variability across samples and within replicates
+# ---------------------------------------------------------------------------------
+
+# Across all 10 samples
+prot.pca = prcomp(t(exprs(qnt.prot)),scale=T)
+j <- ggbiplot(prot.pca, var.axes=F, groups = factor(c(1,1,1,2,2,2,3,3,3,4)), circle = T,obs.scale=1,labels=rownames(prot.pca$x))
+print(j)
+
+# Excluding the Pool.1 sample
+prot.pca.rq = prcomp(t(exprs(qnt.prot[,c(1:9)])),scale=T)
+g <- ggbiplot(prot.pca.rq, var.axes=F, groups = factor(c(1,1,1,2,2,2,3,3,3)), circle = T,obs.scale=1,labels=rownames(prot.pca.rq$x))
+g <- g+labs(colour = "UV Dosage")
+print(g)
+
+# Assuming Pool.1 is actually 275mJ.rep1
+prot.pca.swap = prcomp(t(exprs(qnt.prot[,c(1:3,5:10)])),scale=T)
+h <- ggbiplot(prot.pca.swap, var.axes=F, groups = factor(c(1,1,1,2,2,3,3,3,2)), circle = T,obs.scale=1,labels=rownames(prot.pca.swap$x))
+print(h)
+
+# Removing both problem samples
+prot.pca.no.dud = prcomp(t(exprs(qnt.prot[,c(1:2,5:10)])),scale=T)
+k <- ggbiplot(prot.pca.no.dud, var.axes=F, groups = factor(c(1,1,2,2,3,3,3,4)), circle = T,obs.scale=1,labels=rownames(prot.pca.no.dud$x))
+print(k)
+
+# To finish off, some boxplots....
+pData(qnt.prot) = pData(impute.res)
+
+# Are the values vastly different
+boxplot(exprs(qnt.prot),las=2)
+
+```
+I've been looking to explain what I see. It seems like the most obvious answer would be that Pool.1 and 275mJ.1 are swapped. However, upon speaking with Rayner, this did not happen. He sets up the tubes in a row and adds the labels in order so the last sample was the pool and the 4th was 275mJ.1. What Rayner did say was that the tube with 150mJ.3 was dropped and sample had a little shake/tumble which might have affected its quality. I don't know at which stage of the protocol this happened but it did. This would explain the separation of 150mJ.3 from the other two 150mJs. However, the 150mJ triplicate still cluster together on the hclust plots. With sample 275mJ.1, Rayner remembers it being odd but we don't know why or how. 
+
+An alternate explanation is that sample 275mJ.1 did not elute(?) out properly while it was being prepared but it did by the time the pool was made. The pool was made of equal volumes of all 9 samples rather than equal protein amounts so there will be a higher representation of more abundant samples and lower of less abundant samples. 
+
+Have gone back to look at the "cor.prot" matrix and as Tom suspected, the Pool.1 correlates slightly better with non-dodgey 275mJ (corr = 0.94) than with 400mJ (0.88) and non-dodgey 150mJ (0.87) but not significantly more, hence the cluster plot looks like it does. The two dogey samples 150mJ.3 and 275mJ.1 have been left out of the average correlation calculation above.
+
+Would like to take a picture of the table of final concentrations of samples that went into the pool and put it in the pData dataframe so we have it for furture reference. Rayner is re-doing experiment. 
+
+The boxplots seem to indicate that the two dodgey samples are missing proteins that are lowly expressed. Maybe they were too low to be detected by the mass spec ? 
+
+```{r 05_Creating-a-backgorund-protein-list}
+
+# -------------------------------------------------------------------------------------------------------------------------------------
+# Step 05: Creating a background list of proteins for U20S to be used for functional enrichment
+# Using GO terms and Interpro domains for function of proteins detected by UV crosslinking and Trizol-enrichment
+# All data are based on Trizol-4-step and 400mJ of UV exposure for 2 mins (?)
+# -------------------------------------------------------------------------------------------------------------------------------------
+
+
+#==========================================================================================================================================
+# Using U2OS protein list from Geiger et al as the background list. This consists of maximal list of proteins expressed in U20S cell lines
+# ~ 7500 proteins. We are however reading in the peptides and aggregating them using MSnbase as we did with the UV dosage data
+#==========================================================================================================================================
+
+# Read data from Tom's list of Geiger proteins
+# Tom took the Supplementary data from paper and re-annotated it with master proteins using his script. 
+# The script gets focuses on using Swissprot IDs rather than both Swissprot and Trembl. 
+# It also marks which proteins are "crap" or "contaminants"
+# Finally, it provides a measure of which peptides could be mapped to a unique protein. We use this as a filter for downstream analyses
+u2os <- read.delim("Input/Geiger_et_al_2012_U2OS_peptides_plus_master.txt",sep="\t",header=T)
+head(u2os)
+dim(u2os) # 68621 21
+
+# Filter data - keep peptides with unique master proteins, those which are not "crap" and those that are not missing a master protein
+u2os.filt1 = u2os[which(u2os$unique == 1 & u2os$master_protein != "" & u2os$crap_protein != 1),]
+
+# Keep only those columnns with data of interest
+# Geiger et al produced a triplicate MS dataset for the U2OS cell line
+u2os.filt2 = u2os.filt1[,c(5:6,17,11:16,18:19)]
+head(u2os.filt2)
+
+# Checking for peptide loss. We loose ~ 400 peptides out of nearly 70,000 so not too concerned
+dim(u2os) # 68621 21
+dim(u2os.filt1) # 64967 21
+dim(u2os.filt2) # 64967 11
+
+# Create an MSnSet object of the background list 
+u2os.samp = data.frame(sample=c("Intensity.U2OS_1","Intensity.U2OS_2","Intensity.U2OS_3"),rep=c(1,2,3))
+rownames(u2os.samp) = u2os.samp$sample
+res.u2os <- MSnSet(exprs = as.matrix(u2os.filt2[,c(5:7)]),fData=u2os.filt2[,-c(5:7)],pData = u2os.samp)
+
+# Impute missing data in the background list from Geiger et al.
+# Haven't drawn any plots for this. Can do it at a later date
+impute.u2os <- impute(res.u2os,method = "knn")
+
+# Aggregate Geiger et al data from peptides to proteins
+# 64967 peptides are aggregated to 7507 proteins
+agg.u2os = combineFeatures(impute.u2os,groupBy = fData(impute.u2os)$master_protein,cv = T,fun = "median")
+dim(agg.u2os)
+```
+There are 7507 proteins in the U20S cell line, across 3 replicates, based on the Geiger et al., dataset. The next step is to annotate this gene list with the various functional categories that we want to perform enrichment analysis for. 
+
+```{r 06_U2OS-proteins-annotation}
+
+#------------------------------------------------------------------------------------------------------------------------
+# Step 06: Mapping 'background' as well as 'expressed' list of proteins to various annotations
+# Used a few different packages - wanted to settle on getBM from 'biomaRt' as output in easy to use format. 
+# Except that it was extremely slow. Hence used 'queryMany' from mygene and will reformat data.
+#------------------------------------------------------------------------------------------------------------------------
+
+#------------------------------------------------------
+# Mapping Geiger U2OS list of proteins to GO terms
+#------------------------------------------------------
+
+# Geiger list being annotated with interpro descriptions - fast as done in chunks
+# 7507 uniprot IDs yield 7574 lines of data
+library(mygene)
+geiger.qm = queryMany(fData(agg.u2os)$master_protein,scopes="uniprot",fields=c("ensembl","name","symbol","interpro","go"))
+geiger.qm$domains = sapply(sapply(geiger.qm$interpro,"[[",3),function(x) paste(x,collapse="; "))
+geiger.qm$go.bp = sapply(sapply(geiger.qm$go.BP,"[[",2),function(x) paste(x,collapse="; "))
+geiger.qm$go.mf = sapply(sapply(geiger.qm$go.MF,"[[",2),function(x) paste(x,collapse="; "))
+geiger.qm$go.cc = sapply(sapply(geiger.qm$go.CC,"[[",2),function(x) paste(x,collapse="; "))
+geiger.qm$go.all = paste(geiger.qm$go.bp,geiger.qm$go.cc,geiger.qm$go.mf,sep="; ")
+#head(geiger.qm)
+
+#-------------------------------------------------------------------------
+# Mapping Trizol-enriched list of proteins to gene domains from Interpro.
+#-------------------------------------------------------------------------
+# 1744 uniprot IDs yield 1780 lines of data
+uv.qm = queryMany(fData(qnt.prot)$Master.Protein.Accessions,scopes="uniprot",fields=c("ensembl","name","symbol","interpro","go"))
+uv.qm$domains = sapply(sapply(uv.qm$interpro,"[[",3),function(x) paste(x,collapse="; "))
+uv.qm$go.bp = sapply(sapply(uv.qm$go.BP,"[[",2),function(x) paste(x,collapse="; "))
+uv.qm$go.mf = sapply(sapply(uv.qm$go.MF,"[[",2),function(x) paste(x,collapse="; "))
+uv.qm$go.cc = sapply(sapply(uv.qm$go.CC,"[[",2),function(x) paste(x,collapse="; "))
+uv.qm$go.all = paste(uv.qm$go.bp,uv.qm$go.cc,uv.qm$go.mf,sep="; ")
+#head(uv.qm)
+
+```
+Now that we have mapped genes to annotations, time for some enrichment analysis. 
+
+```{r 07_Performing-enrichment-analysis}
+
+#------------------------------------------------------------------------------------------------------------------------
+# Step 07: Performing enrichment analysis using 'goseq' package
+# We use GO terms and Interpro domains for enrichment analysis
+#------------------------------------------------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------
+# Function  : runGoseq
+# Aim       : runs goseq on a list of genes
+# Input     : list of genes
+# Output    : enriched list of Interpro domains
+# ------------------------------------------------------------------------
+
+runGoseq <- function(genelist,bglist,bias.dat=NULL,cat.oligo){
+
+  # setting up goseq object
+  all.genes.comp = rep(0,nrow(bglist))
+  names(all.genes.comp) = rownames(bglist)
+  all.genes.comp[which(names(all.genes.comp) %in% unique(genelist))] = 1
+  table(all.genes.comp)
+  
+  # Remove missing values
+  comp.no.missing = all.genes.comp[which(!is.na(names(all.genes.comp)))]
+  table(comp.no.missing)
+  
+    
+  # Running the function to calculate weights. We have no bias information as we did in UV experiment
+  # This is because mass spec was run in detection mode not quantitation mode. 
+  pwf.comp = nullp(comp.no.missing,'hg19','geneSymbol', bias=bias.dat,plot.fit=TRUE)
+  
+  # goseq enrichment with domains for cross-linked samples
+  goseq.comp = goseq(pwf.comp,gene2cat = cat.oligo)
+  goseq.comp$BH_over_represented_pvalue = p.adjust(goseq.comp$over_represented_pvalue,method = "BH")
+  goseq.comp
+  
+  enriched.goseq.comp = goseq.comp[which(goseq.comp$BH_over_represented_pvalue <= 0.05),]
+  return(list(goseq.comp,enriched.goseq.comp))
+
+}
+
+#----------------------------------------------------
+# Using Goseq with protein abundance as a bias....
+#----------------------------------------------------
+
+# Want to be able to use both UniProt and Gene symbols as references for bias in downstream analysis
+bias.df = data.frame(protbias = rowMax(exprs(agg.u2os)),UNIPROT = fData(agg.u2os)$master_protein,SYMBOL=sapply(strsplit(as.character(fData(agg.u2os)$protein_description),"\\||\\_"),"[[",3))
+head(bias.df)
+
+# Converting Geiger et al domains data to a list with each line only having one domain
+geiger.doms = data.frame(geiger.qm[,c("query","domains")])
+geiger.gos = data.frame(geiger.qm[,c("query","go.all")])
+
+library(data.table)
+d.dt <- data.table(geiger.doms, key="query")
+geiger.cat <- d.dt[, list(domains = unlist(strsplit(domains, "; "))), by=query]
+
+go.dt = data.table(geiger.gos, key="query")
+geiger.cat.go <- go.dt[, list(go.terms = unlist(strsplit(go.all, "; "))), by=query]
+
+# Setting up a 'genes' vector. We've only kept those genes present in u2os as the universe
+# Then we mark all those that are enriched in the analysis as genes of interest (DE if you will)
+# We have 1435 genes out of 1516 that have bias data and go terms
+
+# Running goseq with GO categories
+rownames(bias.df) = bias.df$UNIPROT
+uv.enrich.go = runGoseq(uv.qm$query,bias.df,bias.df$protbias,geiger.cat.go)
+# uv.enrich.go = uv.enrich.go[order(uv.enrich.go$BH_over_represented_pvalue),]
+
+# Running goseq with Interpro domains
+uv.enrich.interpro = runGoseq(uv.qm$query,bias.df,bias.df$protbias,geiger.cat)
+
+# Writing output to text files
+write.table(data.frame(uv.enrich.go[[2]]),paste(outdir,"Trizol-UV-dosage_GO-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(data.frame(uv.enrich.interpro[[2]]),paste(outdir,"Trizol-UV-dosage_Interpro-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+```
+The protein "universe" used here is the list of all proteins discovered in Geiger et al., 2012. The list of peptides was mapped to proteins by Tom and annotated with master protein identifiers, crap proteins and uniqueness. This was used as it is the most comprehensive list of U2OS proteins mapped using mass spec to date. After filtering, there were ~7500 proteins generated in the study. 
+
+The "DE list" or "enriched" list of proteins are those that were expressed in the UV dosage experiment across all 9 samples. This yields 1744 proteins of which ~1500 could be mapped to GO identifiers. I tried doing this mapping with both 'bioMart' and 'MyGene' databases available as packages within R. The latter was phenomenally faster, hence I proceeded with it. 
+
+For GO enrichment, I used the 'goseq' package which accounts for any bias (here abundance of protein) and then checks for enrichment. 'goseq' yielded 94 terms of which 40 were BP, 36 were CC and 18 were MF terms. Of the BP (Biological Process) terms, more than half were involved in RNA processing and translation.
+
+Would like to map each of the proteins to PFAM/SMART domains to see if they are indeed RNA binding proteins......
+Have mapped RNA BP domains to both Geiger and UV.dosage. 
+Need to look at the genes involved for which we have further evidence that they are indeed RBPs
+
+The domain "Nucleotide-bd_a/b_plait" is present in almost all (16/18) heterogeneous nuclear ribonucleoproteins whose main task is to move mRNA out of the nucleus. This domain has an interpro entry IPR012677 which is no longer valid. This domain is also present in nucleolin and EWSR1. This might be the "RGG-box" domain eluded to in Burd and Dreyfuss, 1994. Excitingly, "Nucleotide-bd_a/b_plait" is a top domain the goseq analysis. I will substitute hnRNP searches with this term. 
+
+"Ig-like"/"Ig_sub" from Tom's notes are indicative of glycoproteins which might be RNA-binding. There are 58 Ig term related proteins in the UV-dosage experiments of which only 2 have RNA-binding domains indicating only a small fraction have RNA binding capapbilities but majority of them are involved in other functions.
+
+```{r 08_Mapping-oligodT-to-domains}
+
+#--------------------------------------------------------------------
+# 08 : Mapping oligodT data to domains and looking for enrichment
+#--------------------------------------------------------------------
+
+oligo.cl.in.nc = as.character(readRDS("Input/CL_proteins.rds")) # 652 unique Swissprot IDs from Tom's peptide aggregated and protein renamed file
+#oligo.cl.in.nc = read.table("Input/Leicester-oligodT-CL-prot.txt",header=T,sep="\t") # 328 gene symbols from Rayner's file
+
+oligo.nc = as.character(readRDS("Input/NCL_proteins.rds")) # 175 unique Swissprot IDs from Tom's peptide aggregated and protein renamed file
+#oligo.nc = read.table("Input/Leicester-oligodT-NC-prot.txt",header=T,sep="\t") # 73 gene symbols from Rayner's file
+
+length(oligo.cl.in.nc)
+length(oligo.nc)
+
+# Present in non-crosslinked and hence will be removed
+
+oligo.cl = oligo.cl.in.nc[-which(oligo.cl.in.nc %in% oligo.nc)] 
+length(oligo.cl) # 489 unique Swissprot IDs from Tom's files not present in non-crosslinked samples
+
+# Which genes are present in both cross and non-crosslinked samples
+cl.and.nc.prot = oligo.cl.in.nc[which(oligo.cl.in.nc %in% oligo.nc)]
+length(cl.and.nc.prot) # 163 present in both crosslinked and non-crosslinked samples
+
+# Convert data table
+# geiger.doms.sym = data.frame(geiger.qm[,c("symbol","domains")])
+# geiger.gos.sym = data.frame(geiger.qm[,c("symbol","go.all")])
+
+# d.dt.sym <- data.table(geiger.doms.sym, key="symbol")
+# geiger.cat.sym <- d.dt.sym[, list(domains = unlist(strsplit(domains, "; "))), by=symbol]
+
+# go.dt.sym = data.table(geiger.gos.sym, key="symbol")
+# geiger.cat.go.sym <- go.dt.sym[, list(go.terms = unlist(strsplit(go.all, "; "))), by=symbol]
+
+# Setting up a 'genes' vector. We've only kept those genes present in u2os as the universe
+# Then we mark all those that are enriched in the analysis as genes of interest (DE if you will)
+# We have 1435 genes out of 1516 that have bias data and go terms
+
+# Running goseq for oligodT which have gene symbols as identifiers
+# rownames(bias.df) = bias.df$SYMBOL
+
+# Crosslinked oligodT all proteins
+cl.all.enrich.go = runGoseq(oligo.cl.in.nc,bias.df,bias.df$protbias,geiger.cat.go)
+cl.all.enrich.interpro = runGoseq(oligo.cl.in.nc,bias.df,bias.df$protbias,geiger.cat)
+write.table(cl.all.enrich.go[[2]][,c(1,6:7,4:5,2,8)],paste(outdir,"oligodT-crosslinked-with-nc-prots_GO-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(cl.all.enrich.interpro[[2]],paste(outdir,"oligodT-crosslinked-with-nc-prots_Interpro-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+# Crosslinked oligodT minus proteins in non-crosslined samples
+cl.enrich.go = runGoseq(oligo.cl,bias.df,bias.df$protbias,geiger.cat.go)
+cl.enrich.interpro = runGoseq(oligo.cl,bias.df,bias.df$protbias,geiger.cat)
+write.table(cl.enrich.go[[2]][,c(1,6:7,4:5,2,8)],paste(outdir,"oligodT-crosslinked_GO-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(cl.enrich.interpro[[2]],paste(outdir,"oligodT-crosslinked_Interpro-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+# Non-crosslinked samples
+nc.enrich.go = runGoseq(oligo.nc,bias.df,bias.df$protbias,geiger.cat.go)
+nc.enrich.interpro = runGoseq(oligo.nc,bias.df,bias.df$protbias,geiger.cat)
+write.table(nc.enrich.go[[2]][,c(1,6:7,4:5,2,8)],paste(outdir,"oligodT-non-crosslinked_GO-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(nc.enrich.interpro[[2]],paste(outdir,"oligodT-non-crosslinked_Interpro-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+# Common to both cross-linked and non-crosslinked samples
+nc.cl.enrich.go = runGoseq(cl.and.nc.prot,bias.df,bias.df$protbias,geiger.cat.go)
+nc.cl.enrich.interpro = runGoseq(cl.and.nc.prot,bias.df,bias.df$protbias,geiger.cat)
+write.table(nc.enrich.go[[2]][,c(1,6:7,4:5,2,8)],paste(outdir,"oligodT-cl-and-nc_GO-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(nc.enrich.interpro[[2]],paste(outdir,"oligodT-cl-and-nc_Interpro-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+
+```
+In this first step, we are reading in oligodT data from one experiment with both crosslinked(cl) and non-crosslinked(nc) samples. We remove proteins from the 'cl' which were also present in 'nc' as we cannot comment on enrichment.
+
+Interestingly, the oligodT data seems a lot "cleaner" than trizol dataset. By this I mean, the top domains are most definitely all known RNA-binding domains based on literature looking at RBPs (Lunde 2007, Burd 1994). In the Trizol data we get "Ig-like" domains as one of the top hits which we don't see at all in the oligodT data.
+
+Between crosslinked and non-crosslinked samples, we still see some overlap in that we are getting RNA-binding domains and proteins in non-crosslinked samples but the number of such proteins in a LOT lower in non-crosslinked than in crosslinked samples. 
+
+```{r 09_Annotating-RBD-domains}
+#------------------------------------------------------------------------------------------------------------------------
+# Step 09 : Annotating all protein lists with counts of RBD domains
+#------------------------------------------------------------------------------------------------------------------------
+
+#--------------------------------------------------------------------------------
+# Making a list of domains that define RNA binding proteins
+# Couldn't find PIWI/PAZ domains in the UV gene list but present in Geiger list
+# Looking at Burd paper which includes 'RGG' box which I think is HnRNP as well as cold_shock domain
+# Can't find TRAP protein (trp RNA-Binding attenuation protein)
+# Have added new RBDs from Castello's 2016 paper - Thioredoxin, PDZ, DZF, 
+#--------------------------------------------------------------------------------
+
+rbd.doms = c("RRM_dom","KH_dom","dsRBD_dom","Znf_CCCH","Znf_C2H2","Znf_CCHC","S1_dom","PAZ_dom","Piwi","Nucleotide-bd_a/b_plait","CSD","Cold-shock_CS","Pumilio_RNA-bd_rpt","SAM;","SAM/pointed","DEAD","Thioredoxin","PDZ","DZF_dom")
+rbd.doms
+
+# Annotating both geiger and uv-dosage datasets with known "rbd" domains and how many of these RBD domains each protein has.
+uv.qm$num.rbds = rowSums(sapply(rbd.doms, function(x) grepl(x, uv.qm$domains)))
+uv.qm$which.rbd = apply(sapply(rbd.doms, function(x) grepl(x, uv.qm$domains)),1, function(y) paste(names(which(y==T)),collapse="; "))
+#head(uv.qm[which(uv.qm$num.rbds != 0),],n=10)
+
+geiger.qm$num.rbds = rowSums(sapply(rbd.doms, function(x) grepl(x, geiger.qm$domains)))
+geiger.qm$which.rbd = apply(sapply(rbd.doms, function(x) grepl(x, geiger.qm$domains)),1, function(y) paste(names(which(y==T)),collapse="; "))
+#head(geiger.qm[which(geiger.qm$num.rbds != 0),],n=10)
+
+
+# Printing what percentage  of each list is annotated with RNA binding domains
+obj.names = c("oligo.cl.in.nc","oligo.cl","oligo.nc","cl.and.nc.prot")
+count = 0
+
+for(y in list(oligo.cl.in.nc,oligo.cl,oligo.nc,cl.and.nc.prot)){
+  count = count+1
+  y = queryMany(y,scopes="uniprot",fields=c("ensembl","name","symbol","interpro","go"))
+  y$domains = sapply(sapply(y$interpro,"[[",3),function(x) paste(x,collapse="; "))
+  y$num.rbds = rowSums(sapply(rbd.doms, function(x) grepl(x, y$domains)))
+  y$which.rbd = apply(sapply(rbd.doms, function(x) grepl(x, y$domains)),1, function(z) paste(names(which(z==T)),collapse="; "))
+  print(table(y$num.rbds))
+  print(paste("Percentage of proteins with RNA-binding domains in ", obj.names[count]," = ",round(100*sum(table(y$num.rbds)[2:4])/sum(table(y$num.rbds)),2),sep=""))
+}
+```
+
+```{r 10_Intersect-of-Trizol-oligodT}
+#-----------------------------------------------------------------------
+# 10 : Looking at the intersect of proteins between oligodT and Trizol
+#-----------------------------------------------------------------------
+
+# Using Trizol mapped to hgnc_symbol as oligodT is only in symbols.
+library(venn)
+Trizol = unique(uv.qm$query)
+oligodT = unique(oligo.cl)
+v = venn(list(Trizol=Trizol,oligodT=oligodT),intersections=T)
+
+both = attr(v,"intersection")$`Trizol:oligodT` # n = 298
+oligo.only = attr(v,"intersection")$`oligodT` # n = 191
+trizol.only = attr(v,"intersection")$`Trizol` # n = 1446
+
+# Enrichment for overlaps and setdiffs
+m = c("both","oligo-only","trizol-only")
+c = 0
+for(t in list(both=both,oligo.only=oligo.only,trizol.only=trizol.only)){
+  c=c+1
+  t.enrich.go = runGoseq(t,bias.df, bias.df$protbias,geiger.cat.go)
+  t.enrich.interpro = runGoseq(t,bias.df, bias.df$protbias,geiger.cat)
+  write.table(t.enrich.go[[2]][,c(1,6:7,4:5,2,8)],paste(outdir,paste(m[c],"-genes-GO-enrichment.txt",sep=""),sep="/"),sep="\t",row.names=F,quote=F)
+  write.table(t.enrich.interpro[[2]],paste(outdir, paste(m[c],"-genes-Interpro-enrichment.txt",sep=""),sep="/"),sep="\t",row.names=F,quote=F)
+}
+
+oo = intersect(oligo.only,geiger.qm$query) # 170/191
+tt = intersect(trizol.only,geiger.qm$query) # 1144/1446
+bl = intersect(both,geiger.qm$query) # 297/298 mising EIF3C/Q99613
+```
+
+```{r 11_Detour-comparing-other-U2OS-datasets}
+
+#------------------------------------------------------------------------------------------------------------------------
+# Step 11 : Comparing 3 different U2OS proteomics datasets from the current decade
+#------------------------------------------------------------------------------------------------------------------------
+
+geiger = as.character(unique(fData(agg.u2os)$master_protein))
+
+beck = read.table("Input/Beck2011_n5781.txt")
+beck = as.character(beck$V1)
+
+lundberg.ens = read.table("Input/Lundberg2010_n5480.txt")
+lundberg = unique(bitr(as.character(lundberg.ens$V1),fromType="ENSEMBL", toType="UNIPROT", OrgDb="org.Hs.eg.db")$UNIPROT)
+length(lundberg)
+
+library(venn)
+library(gplots)
+library(limma)
+
+venn.u2os = venn(list(Geiger2012=geiger,Beck2011=beck,Lundberg2010=lundberg))
+
+```
+Small exercise on how much Geiger et al, Beck et al, and Lundberg et al., protein sets from Mass Spectrometery experiments overlap. With Lundberg et al., I had to map Ensembl IDs to UNIPROT and then do the comparison which caused a one-to-many mapping. The excess 4941 only found in Lundberg et al is almost exclusively due to the mapping of one Ensembl ID to many UNIPROT IDs. Geiger et al, being the most recent study does claim to have maximal protein mapping for U2OS. Beck et al., 
+
+Should we use just the 4145 that overlaps as our high confident set or focus on Geiger as it the most recent ? 
+

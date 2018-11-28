@@ -1,0 +1,172 @@
+---
+title: "Looking at oligodT enrichment of proteins in insulin treated MCF10A cells"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12,fig.height=8,warning=FALSE, message=FALSE)
+#tidy.opts=list(width.cutoff=80)
+```
+
+```{r A_Startup, hide=T,warning=FALSE, message=FALSE}
+#---------------------------------------------------------------------------
+# Author 	      : Manasa Ramakrishna, mr325@le.ac.uk
+# Date started 	: 19th October, 2017
+# Last modified : 19th October, 2017
+# Aim 		      : Given a set of protein identifiers, map to GO and interpro terms
+#                 and return dictionaries for both. Used as input in the 'gene2cat' variable in goseq
+#--------------------------------------------------------------------------- 
+
+# Invoking libraries
+library(mygene)
+library(goseq)
+library(limma)
+library(ggplot2)
+library(stringr)
+library(data.table)
+library(plyr)
+library(MSnbase)
+
+#Setting working directories
+wd = "/Users/manasa/Documents/Work/TTT/02_Proteomics/09_Veronica-mid-size-expt/"
+setwd(wd)
+getwd()
+
+indir = ("Input/")
+outdir = paste("/Users/manasa/Documents/Work/TTT/02_Proteomics/09_Veronica-mid-size-expt/",paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+```
+Setting up working directories and output folders.
+
+```{r 01_Reading in the data, echo=T}
+# -----------------------------------------------
+# Step 00: Read data
+# Read in all the data required for analysis
+# -----------------------------------------------
+
+# File of contaminants - proteins to exclude from analysis as are things like keratin, alcohol dehydrogenase etc....
+contam = read.delim(paste(indir,"Common contaminant_all.csv",sep="/"),sep=",",header=T)
+
+# Read in the sample file that matches columns to sample contents
+samp.dat = read.delim(paste(indir,"samples.txt",sep="/"),sep="\t",header=T)
+
+# Read in the data files that contain peptide level output from Proteome discoverer...
+starved = read.delim(paste(indir,"Vero_starved_02_10_17_PeptideGroups_reannot.txt",sep="/"),sep="\t",comment.char="",as.is=T,header=T)
+stimulated = read.delim(paste(indir,"Vero_insulin_02_10_17_PeptideGroups_reannot.txt",sep="/"),sep="\t",comment.char="",as.is=T,header=T)
+
+# Filter the data
+starved.filt = starved[which(starved$unique == 1 & starved$master_protein != "" & starved$crap_protein != 1),c(1:6,48:52)]
+stimulated.filt = stimulated[which(stimulated$unique == 1 & stimulated$master_protein != "" & stimulated$crap_protein != 1),c(1:6,48:52)]
+
+# Aggregate peptides to proteins
+starved.prot = unique(starved.filt$protein_description)
+starved.prot = data.frame(cbind(starved.prot,"Starved"))
+colnames(starved.prot) = c("Protein.name","Condition")
+
+stimulated.prot = unique(stimulated.filt$protein_description)
+stimulated.prot = data.frame(cbind(stimulated.prot,"Stimulated"))
+colnames(stimulated.prot) = c("Protein.name","Condition")
+
+# Results
+all.prots = data.frame(rbind(starved.prot,stimulated.prot))
+
+print(length(starved.prot))
+print(length(stimulated.prot))
+
+setdiff(y=starved.prot$Protein.name,x=stimulated.prot$Protein.name)
+setdiff(x=starved.prot$Protein.name,y=stimulated.prot$Protein.name)
+
+```
+
+```{r 02_Reading-in-protein lists}
+
+# -------------------------------------------------------------------------------------------------------------------------------------
+# Step 02: Reading in genes of interest and their backgrounds 
+# -------------------------------------------------------------------------------------------------------------------------------------
+
+# Genes of interest
+huh7 <- read.delim("Input/Huh7-RBP-list.txt",header=T,sep="\t")
+hek293 <- read.delim("Input/HEK293-RBP-list.txt",header=T,sep="\t") # Need to do it by GeneSymbol
+hela <- read.delim("Input/Hela-RBP-list.txt",header=T,sep="\t")
+
+# Background list
+hek.bg = read.delim("./2017-09-15_Output/HEK293_Background-list-of-proteins.txt",header=T,sep="\t")
+hela.bg = read.delim("./2017-09-15_Output/HeLa_Background-list-of-proteins.txt",header=T,sep="\t")
+hela.lysate = read.delim("Input/HeLa-whole-lysate.txt",header=T,sep="\t")
+
+# Sourcing functions
+source("/Users/manasa/Documents/Work/TTT/ThreeTs/proteomics/R/Utility.R")
+
+# Map bglist to GO and Interpro IDs
+hek.qm = myProtMapper(hek.bg$master_protein,out.fields=c("interpro.short_desc","symbol","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+hela.qm = myProtMapper(hela.bg$master_protein,out.fields=c("interpro.short_desc","symbol","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+
+# Castello paper used HeLa whole cell lysate as proteome background so trying that out
+hela.lys.qm = myProtMapper(hela.lysate$name,id.type = "symbol",out.fields=c("interpro.short_desc","uniprot","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+
+# Making gene2cat files for each
+hek.symbol.go = makeGene2Cat(hek.qm,"symbol","go.all",";")
+hek.symbol.doms = makeGene2Cat(hek.qm,"symbol","domains",";")
+hela.symbol.go = makeGene2Cat(hela.qm,"symbol","go.all",";")
+hela.symbol.doms = makeGene2Cat(hela.qm,"symbol","domains",";")
+
+# HeLa whole cell lysate
+hela.lys.sym.go = makeGene2Cat(hela.lys.qm,"query","go.all",";")
+hela.lys.sym.doms = makeGene2Cat(hela.lys.qm,"query","domains",";")
+```
+
+```{r 03_Performing-enrichment-analysis}
+
+#------------------------------------------------------------------------------------------------------------------------
+# Step 03: Performing enrichment analysis using 'goseq' package
+# We use GO terms and Interpro domains for enrichment analysis
+#------------------------------------------------------------------------------------------------------------------------
+
+# Using Goseq with protein abundance as a bias....
+# Want to be able to use UniProt, Gene symbols and Ensembl IDs as references for bias in downstream analysis
+
+# Using protein abundance as a bias vector
+hek.bias = data.frame(exp.bias = hek.bg$max,UNIPROT = hek.bg$master_protein,SYMBOL = sapply(strsplit(as.character(hek.bg$protein_description),"\\||\\_"),"[[",3)) # n = 7962
+rownames(hek.bias) = hek.bias$SYMBOL
+
+hela.bias = data.frame(exp.bias = hela.bg$max,UNIPROT = hela.bg$master_protein,SYMBOL = sapply(strsplit(as.character(hela.bg$protein_description),"\\||\\_"),"[[",3)) # n = 7255
+rownames(hela.bias) = hela.bias$SYMBOL
+
+hela.match = which(hela.bg$master_protein %in% hela.lys.qm$uniprot.Swiss.Prot)
+hela.lys.bias = data.frame(exp.bias = hela.bg$max[hela.match],UNIPROT = hela.bg$master_protein[hela.match],SYMBOL = sapply(strsplit(as.character(hela.bg$protein_description[hela.match]),"\\||\\_"),"[[",3)) # n = 7255
+rownames(hela.lys.bias) = hela.lys.bias$SYMBOL
+
+# Calling goseq with hek data
+hek.enrich.go = runGoseq(hek293$Offical.gene.symbol,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.01)
+hek.enrich.interpro = runGoseq(hek293$Offical.gene.symbol,hek.bias,hek.bias$exp.bias,hek.symbol.doms,0.05)
+
+# Calling goseq with hela data
+hela.enrich.go = runGoseq(hela$Symbol,hela.bias,hela.bias$exp.bias,hela.symbol.go,0.01)
+hela.enrich.interpro = runGoseq(hela$Symbol,hela.bias,hela.bias$exp.bias,hela.symbol.doms,0.05)
+
+# Calling goseq with hela data and whole cell lysate as background
+hela.lys.enrich.go = runGoseq(hela$Symbol,hela.lys.bias,hela.lys.bias$exp.bias,hela.lys.sym.go,0.01)
+hela.lys.enrich.interpro = runGoseq(hela$Symbol,hela.lys.bias,hela.lys.bias$exp.bias,hela.lys.sym.doms,0.05)
+
+# Running goseq for HuH7 without a background but using goseq internal gene list
+all.genes = genes
+all.genes[all.genes == 1] = 0
+all.genes[which(names(all.genes) %in% huh7$ensembl)] = 1
+
+huh7.pwf = nullp(all.genes,'hg19','ensGene')
+huh7.goseq = goseq(huh7.pwf,genome = 'hg19',id = 'ensGene')
+huh7.goseq$BH = p.adjust(huh7.goseq$over_represented_pvalue,method = "BH")
+huh7.enriched = huh7.goseq[which(huh7.goseq$BH <= 0.001),]
+
+# Could run huh7 with hek or hela as background
+huh7.enrich.go = runGoseq(huh7$symbol,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.01)
+huh7.enrich.interpro = runGoseq(huh7$symbol,hek.bias,hek.bias$exp.bias,hek.symbol.doms,0.05)
+
+```

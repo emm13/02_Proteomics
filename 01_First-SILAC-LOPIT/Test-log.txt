@@ -1,0 +1,164 @@
+
+Logfile for assign_uniq_master.py
+
+==============================================================================
+Script arguments:
+--------------------------------------------------------------------------------
+infile: ['Data/Test_Trizol_150mJ_rep1.txt']
+fasta_db: Fasta/Human_201701.fasta
+fasta_crap_db: Fasta/cRAP_FullIdentifiers.fasta
+outfile: Test-out.txt
+logfile: Test-log.txt
+==============================================================================
+
+
+==============================================================================
+Initial file stats
+--------------------------------------------------------------------------------
+# initial peptides: 7479
+# initial proteins: 2216
+==============================================================================
+
+
+==============================================================================
+Parsimonious method to identify minimal set of proteins to account for all peptides
+--------------------------------------------------------------------------------
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+1 remaining protein(s) with 138 peptides
+All peptides are now accounted for

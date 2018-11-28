@@ -1,0 +1,10 @@
+Sample	TMT	Condition	Short.cond	Date	Rep
+A1	126	4h.starved	starved	24.10.2017	2
+A2	127N	4h.starved	starved	17.10.2017	1
+A3	127C	4h.starved	starved	07.11.2017	3
+B1	128N	4h.starved.30min.Ins	Ins.30min	17.10.2017	1
+B2	128C	4h.starved.30min.Ins	Ins.30min	07.11.2017	3
+B3	129N	4h.starved.30min.Ins	Ins.30min	24.10.2017	2
+C1	129C	4h.starved.2hr.Ins	Ins.2hr	24.10.2017	2
+C2	130N	4h.starved.2hr.Ins	Ins.2hr	07.11.2017	3
+C3	130C	4h.starved.2hr.Ins	Ins.2hr	17.10.2017	1

@@ -1,0 +1,462 @@
+<html>
+
+<head>
+<style type="text/css">
+.knitr .inline {
+  background-color: #f7f7f7;
+  border:solid 1px #B0B0B0;
+}
+.error {
+	font-weight: bold;
+	color: #FF0000;
+}
+.warning {
+	font-weight: bold;
+}
+.message {
+	font-style: italic;
+}
+.source, .output, .warning, .error, .message {
+	padding: 0 1em;
+  border:solid 1px #F7F7F7;
+}
+.source {
+  background-color: #f5f5f5;
+}
+.rimage .left {
+  text-align: left;
+}
+.rimage .right {
+  text-align: right;
+}
+.rimage .center {
+  text-align: center;
+}
+.hl.num {
+  color: #AF0F91;
+}
+.hl.str {
+  color: #317ECC;
+}
+.hl.com {
+  color: #AD95AF;
+  font-style: italic;
+}
+.hl.opt {
+  color: #000000;
+}
+.hl.std {
+  color: #585858;
+}
+.hl.kwa {
+  color: #295F94;
+  font-weight: bold;
+}
+.hl.kwb {
+  color: #B05A65;
+}
+.hl.kwc {
+  color: #55aa55;
+}
+.hl.kwd {
+  color: #BC5A65;
+  font-weight: bold;
+}
+</style>
+<b>RRollup : The ins and outs</b>
+</head>
+
+<body>
+
+<p>This is to demonstrate step by step the inner workings of the roll up function written by Ashoka D. Polpitiya in 2007 and contain further changes by V. Schwammle. The objective of the code is to collapse mass spectrometry based peptide abundance data into protein-based abundance data </p>
+
+<div class="chunk" id="unnamed-chunk-1"><div class="rcode"><div class="source"><pre class="knitr r"><span class="hl com">#---------------------------------------------------------------------------</span>
+<span class="hl com"># Author 	      : Manasa Ramakrishna, mr325@le.ac.uk</span>
+<span class="hl com"># Date started 	: 1st June, 2017</span>
+<span class="hl com"># Last modified : 6th June, 2017</span>
+<span class="hl com"># Aim 		      : To take a look at first SILAC labelled LOPIT data on Trizol</span>
+<span class="hl com"># Depends       : On 'silacFunctions.R'. Make sure they are in the same directory</span>
+<span class="hl com"># Notes         : Works on data from Rayner's first experiments</span>
+<span class="hl com">#---------------------------------------------------------------------------</span>
+
+<span class="hl com"># Invoking libraries, setting up directories</span>
+
+<span class="hl kwd">library</span><span class="hl std">(outliers)</span>
+<span class="hl kwd">library</span><span class="hl std">(reshape2)</span>
+
+<span class="hl com">#Setting working directories</span>
+<span class="hl std">wd</span> <span class="hl kwb">=</span> <span class="hl str">&quot;/Users/manasa/Documents/Work/TTT/02_Proteomics/01_First-SILAC-LOPIT/&quot;</span>
+<span class="hl kwd">setwd</span><span class="hl std">(wd)</span>
+<span class="hl kwd">getwd</span><span class="hl std">()</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] &quot;/Users/manasa/Documents/Work/TTT/02_Proteomics/01_First-SILAC-LOPIT&quot;
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl std">indir</span> <span class="hl kwb">=</span> <span class="hl kwd">paste</span><span class="hl std">(wd,</span><span class="hl str">&quot;Input&quot;</span><span class="hl std">,</span><span class="hl kwc">sep</span><span class="hl std">=</span><span class="hl str">&quot;/&quot;</span><span class="hl std">)</span>
+<span class="hl std">outdir</span> <span class="hl kwb">=</span> <span class="hl kwd">paste</span><span class="hl std">(wd,</span><span class="hl kwd">paste</span><span class="hl std">(</span><span class="hl kwd">Sys.Date</span><span class="hl std">(),</span><span class="hl str">&quot;Output&quot;</span><span class="hl std">,</span><span class="hl kwc">sep</span> <span class="hl std">=</span> <span class="hl str">&quot;_&quot;</span><span class="hl std">),</span><span class="hl kwc">sep</span> <span class="hl std">=</span> <span class="hl str">&quot;/&quot;</span><span class="hl std">)</span>
+
+<span class="hl kwa">if</span> <span class="hl std">(</span><span class="hl kwd">exists</span><span class="hl std">(outdir)){</span>
+  <span class="hl kwd">print</span><span class="hl std">(</span><span class="hl str">&quot;Outdir exists&quot;</span><span class="hl std">)</span>
+<span class="hl std">}</span><span class="hl kwa">else</span><span class="hl std">{</span>
+  <span class="hl kwd">dir.create</span><span class="hl std">(outdir)</span>
+<span class="hl std">}</span>
+</pre></div>
+<div class="warning"><pre class="knitr r">## Warning in dir.create(outdir): '/Users/manasa/Documents/Work/TTT/
+## 02_Proteomics/01_First-SILAC-LOPIT//2017-06-06_Output' already exists
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl com"># Sourcing function file</span>
+<span class="hl kwd">source</span><span class="hl std">(</span><span class="hl str">&quot;RRollupMod.R&quot;</span><span class="hl std">)</span>
+</pre></div>
+</div></div>
+
+Reading in data from post-processed mass spectrometry files. Data processed using "Proteome Discoverer" software. Output is in the form of csv. 
+
+<div class="chunk" id="unnamed-chunk-2"><div class="rcode"><div class="source"><pre class="knitr r"><span class="hl com"># File of contaminants - proteins to exclude from analysis as are things like keratin, alcohol dehydrogenase etc....</span>
+<span class="hl std">contam</span> <span class="hl kwb">=</span> <span class="hl kwd">read.delim</span><span class="hl std">(</span><span class="hl str">&quot;Input/Common contaminant_all.csv&quot;</span><span class="hl std">,</span><span class="hl kwc">sep</span><span class="hl std">=</span><span class="hl str">&quot;,&quot;</span><span class="hl std">,</span><span class="hl kwc">header</span><span class="hl std">=T)</span>
+
+<span class="hl com"># Data files</span>
+<span class="hl std">infiles</span> <span class="hl kwb">=</span> <span class="hl kwd">grep</span><span class="hl std">(</span><span class="hl str">&quot;Trizol&quot;</span><span class="hl std">,</span><span class="hl kwd">list.files</span><span class="hl std">(</span><span class="hl str">&quot;Input/&quot;</span><span class="hl std">,</span><span class="hl kwc">full.names</span> <span class="hl std">= T),</span><span class="hl kwc">value</span><span class="hl std">=T)</span>
+<span class="hl std">prot.data</span> <span class="hl kwb">=</span> <span class="hl kwa">NULL</span>
+<span class="hl kwa">for</span> <span class="hl std">(i</span> <span class="hl kwa">in</span> <span class="hl std">infiles){</span>
+  <span class="hl std">in.dat</span> <span class="hl kwb">=</span> <span class="hl kwd">read.delim</span><span class="hl std">(i,</span><span class="hl kwc">sep</span><span class="hl std">=</span><span class="hl str">&quot;\t&quot;</span><span class="hl std">,</span><span class="hl kwc">comment.char</span><span class="hl std">=</span><span class="hl str">&quot;&quot;</span><span class="hl std">,</span><span class="hl kwc">as.is</span><span class="hl std">=T,</span><span class="hl kwc">header</span><span class="hl std">=F)</span>
+  <span class="hl std">in.dat</span><span class="hl opt">$</span><span class="hl std">sample</span> <span class="hl kwb">=</span> <span class="hl kwd">strsplit</span><span class="hl std">(i,</span><span class="hl str">&quot;//&quot;</span><span class="hl std">)[[</span><span class="hl num">1</span><span class="hl std">]][</span><span class="hl num">2</span><span class="hl std">]</span>
+  <span class="hl com">#print(names(in.dat))</span>
+  <span class="hl std">prot.data</span> <span class="hl kwb">=</span> <span class="hl kwd">rbind</span><span class="hl std">(prot.data,in.dat)</span>
+<span class="hl std">}</span>
+
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)</span> <span class="hl kwb">=</span> <span class="hl std">prot.data[</span><span class="hl num">1</span><span class="hl std">,]</span>
+<span class="hl kwd">dim</span><span class="hl std">(prot.data)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] 81595    29
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl com">#head(prot.data)</span>
+
+<span class="hl com"># Remove header lines as they differ in one of the columns</span>
+<span class="hl std">remove.head</span> <span class="hl kwb">=</span> <span class="hl kwd">which</span><span class="hl std">(prot.data[,</span><span class="hl num">1</span><span class="hl std">]</span><span class="hl opt">==</span><span class="hl str">&quot;Checked&quot;</span><span class="hl std">)</span>
+<span class="hl std">prot.data</span> <span class="hl kwb">=</span> <span class="hl std">prot.data[</span><span class="hl opt">-</span><span class="hl std">(remove.head),]</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">##  [1] &quot;Checked&quot;                                 
+##  [2] &quot;Confidence&quot;                              
+##  [3] &quot;Sequence&quot;                                
+##  [4] &quot;Modifications&quot;                           
+##  [5] &quot;Qvality PEP&quot;                             
+##  [6] &quot;Qvality q-value&quot;                         
+##  [7] &quot;# Protein Groups&quot;                        
+##  [8] &quot;# Proteins&quot;                              
+##  [9] &quot;# PSMs&quot;                                  
+## [10] &quot;Master Protein Accessions&quot;               
+## [11] &quot;# Missed Cleavages&quot;                      
+## [12] &quot;Theo. MH+ [Da]&quot;                          
+## [13] &quot;Found in Sample: [S3] F2: Light, Sample&quot; 
+## [14] &quot;Found in Sample: [S12] F2: Heavy, Sample&quot;
+## [15] &quot;Abundance Ratio: (Heavy) / (Light)&quot;      
+## [16] &quot;Abundance: F2: Light, Sample&quot;            
+## [17] &quot;Abundance: F2: Heavy, Sample&quot;            
+## [18] &quot;Quan Info&quot;                               
+## [19] &quot;Amanda Score MS Amanda&quot;                  
+## [20] &quot;Confidence MS Amanda&quot;                    
+## [21] &quot;Search Space MS Amanda&quot;                  
+## [22] &quot;Percolator q-Value MS Amanda&quot;            
+## [23] &quot;Percolator PEP MS Amanda&quot;                
+## [24] &quot;Ions Score Mascot&quot;                       
+## [25] &quot;Confidence Mascot&quot;                       
+## [26] &quot;Search Space Mascot&quot;                     
+## [27] &quot;Percolator q-Value Mascot&quot;               
+## [28] &quot;Percolator PEP Mascot&quot;                   
+## [29] &quot;Trizol_150mJ_rep1.txt&quot;
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl kwd">dim</span><span class="hl std">(prot.data)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] 81586    29
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl com"># Change header names a little to make them neutral and remove space, special characters</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)</span> <span class="hl kwb">=</span> <span class="hl kwd">tolower</span><span class="hl std">(</span><span class="hl kwd">colnames</span><span class="hl std">(prot.data))</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)</span> <span class="hl kwb">=</span> <span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot; &quot;</span><span class="hl std">,</span><span class="hl str">&quot;.&quot;</span><span class="hl std">,</span><span class="hl kwd">colnames</span><span class="hl std">(prot.data))</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)</span> <span class="hl kwb">=</span> <span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot;#&quot;</span><span class="hl std">,</span><span class="hl str">&quot;no&quot;</span><span class="hl std">,</span><span class="hl kwd">colnames</span><span class="hl std">(prot.data))</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)</span> <span class="hl kwb">=</span> <span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot;\\:\\.f2\\:&quot;</span><span class="hl std">,</span><span class="hl str">&quot;n&quot;</span><span class="hl std">,</span><span class="hl kwd">colnames</span><span class="hl std">(prot.data))</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)[</span><span class="hl num">12</span><span class="hl std">]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;theoretical.mass&quot;</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)[</span><span class="hl num">13</span><span class="hl std">]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;light.sample&quot;</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)[</span><span class="hl num">14</span><span class="hl std">]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;heavy.sample&quot;</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)[</span><span class="hl num">15</span><span class="hl std">]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;abundance.ratio.heavy.to.light&quot;</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)[</span><span class="hl num">16</span><span class="hl std">]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;abundance.light&quot;</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)[</span><span class="hl num">17</span><span class="hl std">]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;abundance.heavy&quot;</span>
+<span class="hl kwd">colnames</span><span class="hl std">(prot.data)[</span><span class="hl num">29</span><span class="hl std">]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;sample&quot;</span>
+
+<span class="hl com"># Add rep, reagent and UV amount columns</span>
+<span class="hl std">prot.data</span><span class="hl opt">$</span><span class="hl std">uv</span> <span class="hl kwb">=</span> <span class="hl kwd">sapply</span><span class="hl std">(</span><span class="hl kwd">strsplit</span><span class="hl std">(prot.data</span><span class="hl opt">$</span><span class="hl std">sample,</span><span class="hl str">&quot;_&quot;</span><span class="hl std">),</span><span class="hl str">&quot;[[&quot;</span><span class="hl std">,</span><span class="hl num">2</span><span class="hl std">)</span>
+<span class="hl std">prot.data</span><span class="hl opt">$</span><span class="hl std">rep</span> <span class="hl kwb">=</span> <span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot;.txt&quot;</span><span class="hl std">,</span><span class="hl str">&quot;&quot;</span><span class="hl std">,</span><span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot;rep&quot;</span><span class="hl std">,</span><span class="hl str">&quot;&quot;</span><span class="hl std">,</span><span class="hl kwd">sapply</span><span class="hl std">(</span><span class="hl kwd">strsplit</span><span class="hl std">(prot.data</span><span class="hl opt">$</span><span class="hl std">sample,</span><span class="hl str">&quot;_&quot;</span><span class="hl std">),</span><span class="hl str">&quot;[[&quot;</span><span class="hl std">,</span><span class="hl num">3</span><span class="hl std">)))</span>
+<span class="hl std">prot.data</span><span class="hl opt">$</span><span class="hl std">rep</span> <span class="hl kwb">=</span> <span class="hl kwd">paste</span><span class="hl std">(prot.data</span><span class="hl opt">$</span><span class="hl std">uv,prot.data</span><span class="hl opt">$</span><span class="hl std">rep,</span><span class="hl kwc">sep</span><span class="hl std">=</span><span class="hl str">&quot;.&quot;</span><span class="hl std">)</span>
+<span class="hl std">prot.data</span><span class="hl opt">$</span><span class="hl std">reagent</span> <span class="hl kwb">=</span> <span class="hl kwd">sapply</span><span class="hl std">(</span><span class="hl kwd">strsplit</span><span class="hl std">(prot.data</span><span class="hl opt">$</span><span class="hl std">sample,</span><span class="hl str">&quot;_&quot;</span><span class="hl std">),</span><span class="hl str">&quot;[[&quot;</span><span class="hl std">,</span><span class="hl num">1</span><span class="hl std">)</span>
+<span class="hl kwd">head</span><span class="hl std">(prot.data)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">##   checked confidence            sequence              modifications
+## 2   FALSE       High          AGAHLQGGAK                           
+## 3   FALSE       High        IMNTFSVVPSPK 1xLabel:13C(6)15N(2) [K12]
+## 4   FALSE       High        IMNTFSVVPSPK                           
+## 5   FALSE       High    NQVTQLKEQVPGFTPR                           
+## 6   FALSE       High EQELQQTLQQEQSVLDQLR                           
+## 7   FALSE       High      TTPSVVAFTADGER                           
+##   qvality.pep qvality.q-value no.protein.groups no.proteins no.psms
+## 2 5.61944E-06               0                 1           2      16
+## 3  3.4751E-06               0                 4          11       8
+## 4 2.42801E-06               0                 4          11       6
+## 5 0.000142696               0                 1           2       4
+## 6 1.97349E-07               0                 1           1       6
+## 7 9.80731E-06               0                 1           3       4
+##        master.protein.accessions no.missed.cleavages theoretical.mass
+## 2                         P04406                   0      909.4900898
+## 3 Q13509; P04350; P07437; P68371                   0      1327.716983
+## 4 Q13509; P04350; P07437; P68371                   0      1319.702784
+## 5                         F5H2F4                   1      1841.986822
+## 6                         Q15149                   0      2313.168093
+## 7                         P38646                   0      1450.717248
+##   light.sample heavy.sample abundance.ratio.heavy.to.light abundance.light
+## 2         High   Peak Found                           0.01         5200000
+## 3    Not Found    Not Found                                               
+## 4    Not Found    Not Found                                               
+## 5    Not Found    Not Found                                               
+## 6         High    Not Found                           0.01          656400
+## 7         High    Not Found                                               
+##   abundance.heavy      quan.info amanda.score.ms.amanda
+## 2           43050         Unique             135.209857
+## 3                 No Quan Values            201.8662137
+## 4                 No Quan Values            176.2597659
+## 5                 No Quan Values            127.0712654
+## 6                         Unique            152.1398947
+## 7                 No Quan Values            104.2831076
+##   confidence.ms.amanda search.space.ms.amanda percolator.q-value.ms.amanda
+## 2                 High                   1636                            0
+## 3                 High                   2601                            0
+## 4                 High                   2728                            0
+## 5                 High                   3048                            0
+## 6                 High                   3758                            0
+## 7                 High                   2414                            0
+##   percolator.pep.ms.amanda ions.score.mascot confidence.mascot
+## 2               0.00001018             65.04              High
+## 3              0.000002614             75.28              High
+## 4               0.00001715             79.87              High
+## 5               0.00005757             40.09              High
+## 6                1.928E-07             44.95              High
+## 7               0.00002452             48.27              High
+##   search.space.mascot percolator.q-value.mascot percolator.pep.mascot
+## 2                                             0             2.945E-07
+## 3                                             0             1.695E-07
+## 4                                             0             1.112E-07
+## 5                                             0            0.00003356
+## 6                                             0             1.211E-08
+## 7                                             0             5.664E-07
+##                  sample    uv     rep reagent
+## 2 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 3 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 4 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 5 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 6 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 7 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl com"># ------------------</span>
+<span class="hl com"># Step 1 : Filter </span>
+<span class="hl com"># ------------------</span>
+
+<span class="hl com"># Step 1a : Filter only for those peptides that have a unique master protein. Done using column &quot;quan.info&quot;</span>
+<span class="hl kwd">dim</span><span class="hl std">(prot.data)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] 81586    32
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl std">filt.1a</span> <span class="hl kwb">=</span> <span class="hl std">prot.data[</span><span class="hl kwd">which</span><span class="hl std">(prot.data</span><span class="hl opt">$</span><span class="hl std">quan.info</span> <span class="hl opt">==</span> <span class="hl str">&quot;Unique&quot;</span><span class="hl std">),]</span>
+<span class="hl kwd">dim</span><span class="hl std">(filt.1a)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] 34379    32
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl std">peptide.stats</span> <span class="hl kwb">=</span> <span class="hl kwd">cbind</span><span class="hl std">(</span><span class="hl str">&quot;total&quot;</span><span class="hl std">=</span> <span class="hl kwd">table</span><span class="hl std">(prot.data</span><span class="hl opt">$</span><span class="hl std">sample),</span> <span class="hl str">&quot;unique&quot;</span> <span class="hl std">=</span> <span class="hl kwd">table</span><span class="hl std">(filt.1a</span><span class="hl opt">$</span><span class="hl std">sample),</span> <span class="hl str">&quot;non.unique&quot;</span><span class="hl std">=</span><span class="hl kwd">table</span><span class="hl std">(prot.data</span><span class="hl opt">$</span><span class="hl std">sample)</span><span class="hl opt">-</span><span class="hl kwd">table</span><span class="hl std">(filt.1a</span><span class="hl opt">$</span><span class="hl std">sample))</span>
+<span class="hl std">peptide.stats</span>
+</pre></div>
+<div class="output"><pre class="knitr r">##                       total unique non.unique
+## Trizol_150mJ_rep1.txt  9586   4088       5498
+## Trizol_150mJ_rep2.txt  7165   3048       4117
+## Trizol_150mJ_rep3.txt  8301   3483       4818
+## Trizol_275mJ_rep1.txt  9400   3845       5555
+## Trizol_275mJ_rep2.txt  7606   3091       4515
+## Trizol_275mJ_rep3.txt 13429   6383       7046
+## Trizol_400mJ_rep1.txt  9780   4129       5651
+## Trizol_400mJ_rep2.txt  8890   3422       5468
+## Trizol_400mJ_rep3.txt  7429   2890       4539
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl kwd">dim</span><span class="hl std">(filt.1a)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] 34379    32
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl com">#table(filt.1a$sequence,filt.1a$sample)</span>
+
+<span class="hl com"># This table is very odd. Rayner had an explanation but I'm still muddled</span>
+<span class="hl kwd">table</span><span class="hl std">(filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.sample,filt.1a</span><span class="hl opt">$</span><span class="hl std">light.sample)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">##             
+##               High Not Found Peak Found
+##   High           0      1672       5122
+##   Not Found  15810         0          0
+##   Peak Found 11775         0          0
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl com"># Making two new columns &quot;heavy.mod&quot; and &quot;light.mod&quot; where &quot;High&quot; is converted to &quot;Found&quot;</span>
+<span class="hl com"># Table makes a bit more sense now</span>
+<span class="hl com"># Light = &quot;Cross linked&quot;; Heavy = &quot;Non-crosslinked&quot;</span>
+<span class="hl com"># 15810 peptides across all reps found in Light and not found in Heavy</span>
+<span class="hl com"># 1672 peptides across all reps found in Heavy and not found in Light - contaminants ?</span>
+<span class="hl com"># 16897 peptides across all reps found in both - RBPs ?</span>
+
+<span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.mod</span> <span class="hl kwb">=</span> <span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.sample</span>
+<span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">light.mod</span> <span class="hl kwb">=</span> <span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">light.sample</span>
+<span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">light.mod</span> <span class="hl kwb">=</span> <span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot;Not Found&quot;</span><span class="hl std">,</span><span class="hl str">&quot;not.found&quot;</span><span class="hl std">,filt.1a</span><span class="hl opt">$</span><span class="hl std">light.mod)</span>
+<span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">light.mod</span> <span class="hl kwb">=</span> <span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot;Peak Found&quot;</span><span class="hl std">,</span><span class="hl str">&quot;peak.found&quot;</span><span class="hl std">,filt.1a</span><span class="hl opt">$</span><span class="hl std">light.mod)</span>
+<span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.mod</span> <span class="hl kwb">=</span> <span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot;Not Found&quot;</span><span class="hl std">,</span><span class="hl str">&quot;not.found&quot;</span><span class="hl std">,filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.mod)</span>
+<span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.mod</span> <span class="hl kwb">=</span> <span class="hl kwd">gsub</span><span class="hl std">(</span><span class="hl str">&quot;Peak Found&quot;</span><span class="hl std">,</span><span class="hl str">&quot;peak.found&quot;</span><span class="hl std">,filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.mod)</span>
+<span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.mod[</span><span class="hl kwd">which</span><span class="hl std">(filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.mod</span> <span class="hl opt">==</span> <span class="hl str">&quot;High&quot;</span><span class="hl std">)]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;peak.found&quot;</span>
+<span class="hl std">filt.1a</span><span class="hl opt">$</span><span class="hl std">light.mod[</span><span class="hl kwd">which</span><span class="hl std">(filt.1a</span><span class="hl opt">$</span><span class="hl std">light.mod</span> <span class="hl opt">==</span> <span class="hl str">&quot;High&quot;</span><span class="hl std">)]</span> <span class="hl kwb">=</span> <span class="hl str">&quot;peak.found&quot;</span>
+<span class="hl kwd">table</span><span class="hl std">(</span><span class="hl kwc">light</span><span class="hl std">=filt.1a</span><span class="hl opt">$</span><span class="hl std">light.mod,</span><span class="hl kwc">heavy</span><span class="hl std">=filt.1a</span><span class="hl opt">$</span><span class="hl std">heavy.mod)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">##             heavy
+## light        not.found peak.found
+##   not.found          0       1672
+##   peak.found     15810      16897
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl com"># Step 1b : Filter out those proteins that are contaminants from the contaminants list. </span>
+<span class="hl std">filt.1b</span> <span class="hl kwb">=</span> <span class="hl std">filt.1a[</span><span class="hl opt">-</span><span class="hl kwd">which</span><span class="hl std">(filt.1a</span><span class="hl opt">$</span><span class="hl std">master.protein.accessions</span> <span class="hl opt">%in%</span> <span class="hl std">contam</span><span class="hl opt">$</span><span class="hl std">Protein.Group.Accessions),]</span>
+<span class="hl std">num.contams</span> <span class="hl kwb">=</span> <span class="hl kwd">length</span><span class="hl std">(</span><span class="hl kwd">which</span><span class="hl std">(filt.1a</span><span class="hl opt">$</span><span class="hl std">master.protein.accessions</span> <span class="hl opt">%in%</span> <span class="hl std">contam</span><span class="hl opt">$</span><span class="hl std">Protein.Group.Accessions))</span>
+<span class="hl kwd">dim</span><span class="hl std">(filt.1a)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] 34379    34
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl kwd">dim</span><span class="hl std">(filt.1b)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] 33657    34
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl kwd">print</span><span class="hl std">(num.contams)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">## [1] 722
+</pre></div>
+<div class="source"><pre class="knitr r"><span class="hl com"># ------------------</span>
+<span class="hl com"># Step 2 : Normalise </span>
+<span class="hl com"># heavy = non-crosslinked</span>
+<span class="hl com"># light = crosslinked</span>
+<span class="hl com"># ------------------</span>
+
+<span class="hl com"># Annotate which peptides are missing heavy, light or both, abundance values</span>
+<span class="hl std">filt.1b</span><span class="hl opt">$</span><span class="hl std">missing.val</span> <span class="hl kwb">=</span> <span class="hl kwd">rowSums</span><span class="hl std">(</span><span class="hl kwd">is.na</span><span class="hl std">(filt.1b[,</span><span class="hl kwd">c</span><span class="hl std">(</span><span class="hl str">&quot;abundance.heavy&quot;</span><span class="hl std">,</span> <span class="hl str">&quot;abundance.light&quot;</span><span class="hl std">)]))</span> <span class="hl opt">&gt;</span> <span class="hl num">0</span>
+
+<span class="hl com"># log transform data </span>
+<span class="hl std">filt.1b</span><span class="hl opt">$</span><span class="hl std">abundance.heavy</span> <span class="hl kwb">=</span> <span class="hl kwd">as.numeric</span><span class="hl std">(filt.1b</span><span class="hl opt">$</span><span class="hl std">abundance.heavy)</span>
+<span class="hl std">filt.1b</span><span class="hl opt">$</span><span class="hl std">abundance.light</span> <span class="hl kwb">=</span> <span class="hl kwd">as.numeric</span><span class="hl std">(filt.1b</span><span class="hl opt">$</span><span class="hl std">abundance.light)</span>
+
+<span class="hl std">filt.1b</span><span class="hl opt">$</span><span class="hl std">heavy.log</span> <span class="hl kwb">=</span> <span class="hl kwd">log</span><span class="hl std">(filt.1b</span><span class="hl opt">$</span><span class="hl std">abundance.heavy,</span><span class="hl num">2</span><span class="hl std">)</span>
+<span class="hl std">filt.1b</span><span class="hl opt">$</span><span class="hl std">light.log</span> <span class="hl kwb">=</span> <span class="hl kwd">log</span><span class="hl std">(filt.1b</span><span class="hl opt">$</span><span class="hl std">abundance.light,</span><span class="hl num">2</span><span class="hl std">)</span>
+
+<span class="hl com"># Generate an abundance ratio which for log transformed data is a subtraction</span>
+<span class="hl std">filt.1b</span><span class="hl opt">$</span><span class="hl std">norm.abundance.ratio</span> <span class="hl kwb">=</span> <span class="hl std">filt.1b</span><span class="hl opt">$</span><span class="hl std">light.log</span> <span class="hl opt">-</span> <span class="hl std">filt.1b</span><span class="hl opt">$</span><span class="hl std">heavy.log</span>
+
+<span class="hl com"># Data is normalised</span>
+<span class="hl std">norm.data</span> <span class="hl kwb">=</span> <span class="hl std">filt.1b</span>
+<span class="hl kwd">head</span><span class="hl std">(norm.data)</span>
+</pre></div>
+<div class="output"><pre class="knitr r">##    checked confidence                 sequence        modifications
+## 2    FALSE       High               AGAHLQGGAK                     
+## 6    FALSE       High      EQELQQTLQQEQSVLDQLR                     
+## 9    FALSE       High VLRPQVTAVAQQNQGEVPEPQDMK                     
+## 11   FALSE       High       DYIQKHPELNISEEGITK                     
+## 15   FALSE       High             GEGPEFDVNLSK                     
+## 16   FALSE       High              NLPLPPPPPPR 1xLabel:13C(6) [R11]
+##    qvality.pep qvality.q-value no.protein.groups no.proteins no.psms
+## 2  5.61944E-06               0                 1           2      16
+## 6  1.97349E-07               0                 1           1       6
+## 9  4.30263E-06               0                 1           1       4
+## 11 0.000335278               0                 1           2       7
+## 15 0.000141612               0                 1           1       2
+## 16 0.000123444               0                 1           2       6
+##    master.protein.accessions no.missed.cleavages theoretical.mass
+## 2                     P04406                   0      909.4900898
+## 6                     Q15149                   0      2313.168093
+## 9                     Q14204                   0      2662.361724
+## 11                    E9PKP7                   1      2114.076424
+## 15                    Q09666                   0      1291.616472
+## 16                    P61978                   0      1200.719483
+##    light.sample heavy.sample abundance.ratio.heavy.to.light
+## 2          High   Peak Found                           0.01
+## 6          High    Not Found                           0.01
+## 9          High    Not Found                           0.01
+## 11         High    Not Found                           0.01
+## 15         High   Peak Found                          0.249
+## 16   Peak Found         High                          0.409
+##    abundance.light abundance.heavy quan.info amanda.score.ms.amanda
+## 2          5200000           43050    Unique             135.209857
+## 6           656400              NA    Unique            152.1398947
+## 9           798200              NA    Unique            145.1025773
+## 11          427200              NA    Unique             94.6647608
+## 15         8734000         2175000    Unique            106.5311464
+## 16         6181000         2527000    Unique            86.93340489
+##    confidence.ms.amanda search.space.ms.amanda
+## 2                  High                   1636
+## 6                  High                   3758
+## 9                  High                   3626
+## 11                 High                   3701
+## 15                 High                   1601
+## 16                 High                   1390
+##    percolator.q-value.ms.amanda percolator.pep.ms.amanda ions.score.mascot
+## 2                             0               0.00001018             65.04
+## 6                             0                1.928E-07             44.95
+## 9                             0              0.000005775             50.71
+## 11                    0.0003715                 0.002062             20.89
+## 15                            0               0.00005723             39.12
+## 16                   0.00006554                0.0002702              30.3
+##    confidence.mascot search.space.mascot percolator.q-value.mascot
+## 2               High                                             0
+## 6               High                                             0
+## 9               High                                             0
+## 11              High                                      0.003854
+## 15              High                                             0
+## 16              High                                             0
+##    percolator.pep.mascot                sample    uv     rep reagent
+## 2              2.945E-07 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 6              1.211E-08 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 9            0.000000527 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 11                0.0441 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 15            0.00001359 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+## 16             0.0000217 Trizol_150mJ_rep1.txt 150mJ 150mJ.1  Trizol
+##     heavy.mod  light.mod missing.val heavy.log light.log
+## 2  peak.found peak.found       FALSE  15.39373  22.31008
+## 6   not.found peak.found       FALSE        NA  19.32422
+## 9   not.found peak.found       FALSE        NA  19.60639
+## 11  not.found peak.found       FALSE        NA  18.70455
+## 15 peak.found peak.found       FALSE  21.05258  23.05821
+## 16 peak.found peak.found       FALSE  21.26899  22.55941
+##    norm.abundance.ratio
+## 2              6.916355
+## 6                    NA
+## 9                    NA
+## 11                   NA
+## 15             2.005627
+## 16             1.290415
+</pre></div>
+</div></div>
+
+<p>You can also embed plots, for example:</p>
+
+<div class="chunk" id="unnamed-chunk-3"><div class="rcode"><div class="source"><pre class="knitr r"><span class="hl std">Data</span> <span class="hl kwb">=</span> <span class="hl std">norm.data[,</span><span class="hl kwd">c</span><span class="hl std">(</span><span class="hl str">&quot;light.log&quot;</span><span class="hl std">,</span><span class="hl str">&quot;heavy.log&quot;</span><span class="hl std">)]</span>
+<span class="hl std">Accs</span> <span class="hl kwb">=</span> <span class="hl std">norm.data[,</span><span class="hl str">&quot;sequence&quot;</span><span class="hl std">]</span>
+
+<span class="hl std">minPresence</span><span class="hl kwb">=</span><span class="hl num">50</span>
+<span class="hl std">Mode</span><span class="hl kwb">=</span><span class="hl str">&quot;median&quot;</span>
+<span class="hl std">minPep</span><span class="hl kwb">=</span><span class="hl num">3</span>
+<span class="hl std">minPres</span><span class="hl kwb">=</span><span class="hl num">50</span>
+<span class="hl std">minOverlap</span><span class="hl kwb">=</span><span class="hl num">3</span>
+<span class="hl std">oneHitWonders</span><span class="hl kwb">=</span><span class="hl std">F</span>
+<span class="hl std">reportCount</span><span class="hl kwb">=</span><span class="hl num">FALSE</span>
+<span class="hl std">outfolder</span><span class="hl kwb">=</span><span class="hl std">outdir</span>
+<span class="hl std">plotflag</span><span class="hl kwb">=</span><span class="hl num">FALSE</span>
+<span class="hl std">gpvalue</span><span class="hl kwb">=</span><span class="hl num">0.05</span>
+<span class="hl std">gminPCount</span><span class="hl kwb">=</span><span class="hl num">5</span>
+<span class="hl std">center</span><span class="hl kwb">=</span><span class="hl num">TRUE</span>
+<span class="hl std">progressbar</span><span class="hl kwb">=</span><span class="hl kwa">NULL</span>
+<span class="hl std">progresslabel</span><span class="hl kwb">=</span><span class="hl kwa">NULL</span>
+</pre></div>
+</div></div>
+
+</body>
+</html>

@@ -1,0 +1,257 @@
+---
+title: "Looking at oligodT enrichment of proteins in HeLa,HEK293 and HuH7"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12,fig.height=8,warning=FALSE, message=FALSE)
+#tidy.opts=list(width.cutoff=80)
+```
+
+```{r A_Startup, hide=T,warning=FALSE, message=FALSE}
+#---------------------------------------------------------------------------
+# Author 	      : Manasa Ramakrishna, mr325@le.ac.uk
+# Date started 	: 15th September, 2017
+# Last modified : 15th September, 2017
+# Aim 		      : Given a set of protein identifiers, map to GO and interpro terms
+#                 and return dictionaries for both. Used as input in the 'gene2cat' variable in goseq
+#--------------------------------------------------------------------------- 
+
+# Invoking libraries
+library(mygene)
+library(goseq)
+library(limma)
+library(ggplot2)
+library(stringr)
+library(data.table)
+library(plyr)
+library(MSnbase)
+
+#Setting working directories
+wd = "/Users/manasa/Documents/Work/TTT/02_Proteomics/03_Leicester-Oligo-dT/"
+setwd(wd)
+getwd()
+
+indir = ("Input/")
+outdir = paste("/Users/manasa/Documents/Work/TTT/02_Proteomics/03_Leicester-Oligo-dT/",paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+```
+Setting up working directories and output folders.
+
+```{r 00_Functions-needed}
+# -------------------------------------------
+# Function : aggProt
+# -------------------------------------------
+
+aggProt <- function(pepdat){
+  
+  # Aggregate to peptide groups
+  a = aggregate(pepdat[,grep("Intensity",colnames(pepdat))],by=list(sequence=pepdat$Sequence,master_protein=pepdat$master_protein,protein_length=pepdat$protein_length,protein_description = pepdat$protein_description),FUN="median",na.rm=T)
+  
+  # Aggregate to proteins
+  b = aggregate(a[,grep("Intensity",colnames(a))],by=list(master_protein=a$master_protein,protein_length=a$protein_length,protein_description = a$protein_description),FUN="median",na.rm=T)
+  
+  b = aggregate(a[,grep("Intensity",colnames(a))],by=list(master_protein=a$master_protein),FUN="median",na.rm=T)
+  
+  # Remove all 0 rows
+  c = b[which(rowSums(b[,grep("Intensity",colnames(b))],na.rm=T)!=0),]
+  c$max = apply(c[,grep("Intensity",colnames(c))],1,"max",na.rm=T)
+  
+  # Losses at each step
+  dim(a)
+  dim(b)
+  dim(c)
+  
+  return(c)
+}
+
+```
+
+```{r 00_Creating-background-protein-lists,eval=FALSE,echo=T}
+# -------------------------------------------------------------------------------------------------------------------------------------
+# Step 01: Creating background list of proteins for HeLa and HEK293T from Geiger et al., 2012
+# -------------------------------------------------------------------------------------------------------------------------------------
+
+all.lines <- read.delim("Input/geiger-peptide-11-cell-lines_reannot.txt",sep="\t",header=T,stringsAsFactors = F)
+head(all.lines,10)
+dim(all.lines) # 158292 50 
+
+# Filter and subset data
+# Filter data - keep peptides with unique master proteins, those which are not "crap" and those that are not missing a master protein
+all.filt = all.lines[which(all.lines$unique == 1 & all.lines$master_protein != "" & all.lines$crap_protein != 1),c(5:49)]
+dim(all.filt) # 148593 45
+
+# Loop over dataset and split into multiple cell lines
+metadat = all.filt[,grep("Intensity",colnames(all.filt),invert=T)]
+cell.lines = sapply(strsplit(grep("Intensity",colnames(all.filt),value=T),"\\."),"[[",2)
+
+# Split data into each cell line along with metadata
+for(j in seq(1,length(cell.lines),by = 3)){
+  name = strsplit(cell.lines[j],"_")[[1]][1]
+  print(cell.lines[j:(j+2)])
+  temp = all.filt[,grep(paste(cell.lines[j:(j+2)],collapse="|"),colnames(all.filt))]
+  temp = cbind(metadat,temp)
+  
+  agg = aggProt(temp)
+  print(dim(agg))
+  
+  write.table(temp,paste(outdir,paste(name,"Background-list-of-peptides.txt",sep="_"),sep="/"),sep="\t",row.names=F,quote=F)
+  write.table(agg,paste(outdir,paste(name,"Background-list-of-proteins.txt",sep="_"),sep="/"),sep="\t",row.names=F,quote=F)
+}
+```
+
+```{r 02_Reading-in-protein lists}
+
+# -------------------------------------------------------------------------------------------------------------------------------------
+# Step 02: Reading in genes of interest and their backgrounds 
+# -------------------------------------------------------------------------------------------------------------------------------------
+
+# Genes of interest
+huh7 <- read.delim("Input/Huh7-RBP-list.txt",header=T,sep="\t")
+hek293 <- read.delim("Input/HEK293-RBP-list.txt",header=T,sep="\t") # Need to do it by GeneSymbol
+hela <- read.delim("Input/Hela-RBP-list.txt",header=T,sep="\t")
+
+# Background list
+hek.bg = read.delim("./2017-09-15_Output/HEK293_Background-list-of-proteins.txt",header=T,sep="\t")
+hela.bg = read.delim("./2017-09-15_Output/HeLa_Background-list-of-proteins.txt",header=T,sep="\t")
+hela.lysate = read.delim("Input/HeLa-whole-lysate.txt",header=T,sep="\t")
+
+# Sourcing functions
+source("/Users/manasa/Documents/Work/TTT/ThreeTs/proteomics/R/Enrichment.R")
+
+# Map bglist to GO and Interpro IDs
+hek.qm = myProtMapper(hek.bg$master_protein,out.fields=c("interpro.short_desc","symbol","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+hela.qm = myProtMapper(hela.bg$master_protein,out.fields=c("interpro.short_desc","symbol","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+
+# Castello paper used HeLa whole cell lysate as proteome background so trying that out
+hela.lys.qm = myProtMapper(hela.lysate$name,id.type = "symbol",out.fields=c("interpro.short_desc","uniprot","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+
+# Making gene2cat files for each
+hek.symbol.go = makeGene2Cat(hek.qm,"symbol","go.all",";")
+hek.symbol.doms = makeGene2Cat(hek.qm,"symbol","domains",";")
+hela.symbol.go = makeGene2Cat(hela.qm,"symbol","go.all",";")
+hela.symbol.doms = makeGene2Cat(hela.qm,"symbol","domains",";")
+
+# HeLa whole cell lysate
+hela.lys.sym.go = makeGene2Cat(hela.lys.qm,"query","go.all",";")
+hela.lys.sym.doms = makeGene2Cat(hela.lys.qm,"query","domains",";")
+```
+
+```{r 03_Performing-enrichment-analysis}
+
+#------------------------------------------------------------------------------------------------------------------------
+# Step 03: Performing enrichment analysis using 'goseq' package
+# We use GO terms and Interpro domains for enrichment analysis
+#------------------------------------------------------------------------------------------------------------------------
+
+# Using Goseq with protein abundance as a bias....
+# Want to be able to use UniProt, Gene symbols and Ensembl IDs as references for bias in downstream analysis
+
+# Using protein abundance as a bias vector
+hek.bias = data.frame(exp.bias = hek.bg$max,UNIPROT = hek.bg$master_protein,SYMBOL = sapply(strsplit(as.character(hek.bg$protein_description),"\\||\\_"),"[[",3)) # n = 7962
+rownames(hek.bias) = hek.bias$SYMBOL
+
+hela.bias = data.frame(exp.bias = hela.bg$max,UNIPROT = hela.bg$master_protein,SYMBOL = sapply(strsplit(as.character(hela.bg$protein_description),"\\||\\_"),"[[",3)) # n = 7255
+rownames(hela.bias) = hela.bias$SYMBOL
+
+hela.match = which(hela.bg$master_protein %in% hela.lys.qm$uniprot.Swiss.Prot)
+hela.lys.bias = data.frame(exp.bias = hela.bg$max[hela.match],UNIPROT = hela.bg$master_protein[hela.match],SYMBOL = sapply(strsplit(as.character(hela.bg$protein_description[hela.match]),"\\||\\_"),"[[",3)) # n = 7255
+rownames(hela.lys.bias) = hela.lys.bias$SYMBOL
+
+# Calling goseq with hek data
+hek.enrich.go = runGoseq(hek293$Offical.gene.symbol,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.01)
+hek.enrich.interpro = runGoseq(hek293$Offical.gene.symbol,hek.bias,hek.bias$exp.bias,hek.symbol.doms,0.05)
+
+# Calling goseq with hela data
+hela.enrich.go = runGoseq(hela$Symbol,hela.bias,hela.bias$exp.bias,hela.symbol.go,0.01)
+hela.enrich.interpro = runGoseq(hela$Symbol,hela.bias,hela.bias$exp.bias,hela.symbol.doms,0.05)
+
+# Calling goseq with hela data and whole cell lysate as background
+hela.lys.enrich.go = runGoseq(hela$Symbol,hela.lys.bias,hela.lys.bias$exp.bias,hela.lys.sym.go,0.01)
+hela.lys.enrich.interpro = runGoseq(hela$Symbol,hela.lys.bias,hela.lys.bias$exp.bias,hela.lys.sym.doms,0.05)
+
+# Running goseq for HuH7 without a background but using goseq internal gene list
+all.genes = genes
+all.genes[all.genes == 1] = 0
+all.genes[which(names(all.genes) %in% huh7$ensembl)] = 1
+
+huh7.pwf = nullp(all.genes,'hg19','ensGene')
+huh7.goseq = goseq(huh7.pwf,genome = 'hg19',id = 'ensGene')
+huh7.goseq$BH = p.adjust(huh7.goseq$over_represented_pvalue,method = "BH")
+huh7.enriched = huh7.goseq[which(huh7.goseq$BH <= 0.001),]
+
+# Could run huh7 with hek or hela as background
+huh7.enrich.go = runGoseq(huh7$symbol,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.01)
+huh7.enrich.interpro = runGoseq(huh7$symbol,hek.bias,hek.bias$exp.bias,hek.symbol.doms,0.05)
+
+```
+
+```{r 04_Checking-RBP-and-nucleolar-proteome-in-HeLa-K562}
+
+# HeLa
+hela.nucleo = hela.symbol.go$symbol[which(hela.symbol.go$to.id == "GO:0005730")]
+hela.rbp = hela.symbol.go$symbol[which(hela.symbol.go$to.id == "GO:0003723")]
+hela.bias = data.frame(exp.bias = hela.bg$max,UNIPROT = hela.bg$master_protein,SYMBOL = sapply(strsplit(as.character(hela.bg$protein_description),"\\||\\_"),"[[",3)) # n = 7255
+rownames(hela.bias) = hela.bias$SYMBOL
+
+# K562
+k562.bg = read.delim("./2017-09-15_Output/K562_Background-list-of-proteins.txt",header=T,sep="\t")
+k562.qm = myProtMapper(k562.bg$master_protein,out.fields=c("interpro.short_desc","symbol","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+k562.symbol.go = makeGene2Cat(k562.qm,"symbol","go.all",";")
+k562.symbol.doms = makeGene2Cat(k562.qm,"symbol","domains",";")
+
+# Using protein abundance as a bias vector
+k562.bias = data.frame(exp.bias = k562.bg$max,UNIPROT = k562.bg$master_protein,SYMBOL = sapply(strsplit(as.character(k562.bg$protein_description),"\\||\\_"),"[[",3)) # n = 6974
+rownames(k562.bias) = k562.bias$SYMBOL
+
+# MCF10A
+# Taken from Supplementary S1, Lawrence et al, 2015, Cell Reports. Only Swissprot proteins were kept (Trembl discarded) n = 5588
+mcf10a.bg = read.delim("Input/MCF10A-proteome-sp.txt",sep="\t",header=T,stringsAsFactors = F)
+mcf10a.bg$master_protein = sapply(strsplit(mcf10a.bg$Uniprot.Entry,"\\|"),"[[",2)
+mcf10a.bg$sym = sapply(strsplit(sapply(strsplit(mcf10a.bg$Uniprot.Entry,"\\|"),"[[",3),"\\_"),"[[",1)
+mcf10a.bg$max = log2(apply(mcf10a.bg[,c("Rep1","Rep2")], 1, max))
+colnames(mcf10a.bg)[1] = "protein_description"
+
+# Mapping to Go and Interpro
+mcf10a.qm = myProtMapper(mcf10a.bg$UNIPROT,out.fields=c("interpro.short_desc","symbol","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+mcf10a.symbol.go = makeGene2Cat(mcf10a.qm,"symbol","go.all",";")
+mcf10a.symbol.doms = makeGene2Cat(mcf10a.qm,"symbol","domains",";")
+
+# Merging protein entries for the three cell lines
+hela.m = hela.bg[,c("protein_description","master_protein","max")]
+hela.m$sym = sapply(strsplit(sapply(strsplit(as.character(hela.m$protein_description),"\\|"),"[[",3),"\\_"),"[[",1)
+hela.m$line = "HeLa"
+k562.m = k562.bg[,c("protein_description","master_protein","max")]
+k562.m$sym = sapply(strsplit(sapply(strsplit(as.character(k562.m$protein_description),"\\|"),"[[",3),"\\_"),"[[",1)
+k562.m$line = "K562"
+mcf10a.m = mcf10a.bg[,c("protein_description","master_protein","max","sym")]
+mcf10a.m$protein_description = sapply(strsplit(mcf10a.m$protein_description," "),"[[",1)
+mcf10a.m$line = "MCF10A"
+
+all.lines = rbind(hela.m,k562.m,mcf10a.m)
+dim(all.lines) # 19817 entries across 3 cell lines
+length(unique(all.lines$sym)) # 8709 unique genes
+length(unique(all.lines$master_protein)) #9563 unique proteins
+
+# Merging GO entries for all cell lines
+all.go = rbind(hela.symbol.go,k562.symbol.go,mcf10a.symbol.go)
+all.go = unique(all.go) # 142561/321090 are unique
+
+
+# Merging Interpro entries for all cell lines
+all.doms = rbind(hela.symbol.doms,k562.symbol.doms,mcf10a.symbol.doms)
+all.doms = unique(all.doms) # 30213/66505 are unique
+
+# Write all to output
+saveRDS(all.lines,"../../11_NoDS-analysis/Input/HeLa-K562-MCF10A_bglist-proteome.txt")
+saveRDS(all.go,"../../11_NoDS-analysis/Input/HeLa-K562-MCF10A_bglist-GO-terms.txt")
+saveRDS(all.doms,"../../11_NoDS-analysis/Input/HeLa-K562-MCF10A_bglist-Interpro-terms.txt")
+
+```

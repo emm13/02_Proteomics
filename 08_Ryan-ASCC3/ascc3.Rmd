@@ -1,0 +1,205 @@
+---
+title: "Looking at Ryan's mass spectrometry data for HEK293 stimulated with ASCC3"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12,fig.height=8,warning=FALSE, message=FALSE)
+#tidy.opts=list(width.cutoff=80)
+```
+
+```{r A_Startup, hide=T,warning=FALSE, message=FALSE}
+#---------------------------------------------------------------------------
+# Author 	      : Manasa Ramakrishna, mr325@le.ac.uk
+# Date started 	: 5th October, 2017
+# Last modified : 6th October, 2017
+# Aim 		      : Given a set of protein identifiers, map to GO and interpro terms
+#                 and return dictionaries for both. Used as input in the 'gene2cat' variable in goseq
+#--------------------------------------------------------------------------- 
+
+# Invoking libraries
+library(mygene)
+library(goseq)
+library(limma)
+library(ggplot2)
+library(stringr)
+library(data.table)
+library(plyr)
+library(MSnbase)
+library(RColorBrewer)
+library(calibrate)
+library(gplots)
+
+#Setting working directories
+wd = "../manasa/Documents/Work/TTT/02_Proteomics/08_Ryan-ASCC3/Input/"
+setwd(wd)
+getwd()
+
+indir = ("Input/")
+outdir = paste("/Users/manasa/Documents/Work/TTT/02_Proteomics/08_Ryan-ASCC3/",paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+
+source("ascc3Functions.R")
+```
+
+```{r 01_Reading-in-protein-list}
+
+# -------------------------------------------------------------------------------------------------------------------------------------
+# Step 01: Reading in genes of interest from Ryan's experiments and making a DGEList object
+# -------------------------------------------------------------------------------------------------------------------------------------
+
+# Ryan's genes of interest
+hek293.ryan <- read.delim("Input/Ryan_HEK293_ASCC3.txt",header=T,sep="\t")
+hek293.ryan$sym <- sapply(strsplit(as.character(hek293.ryan$Accession.Number),"_"),"[[",1)
+
+# Remove crap proteins
+crap = read.delim("Input/Common contaminant_all.csv",sep=",",stringsAsFactors = F)
+crap$Protein.Description = gsub("Common Laboratory Contaminant -  ","",crap$Protein.Description)
+crap$gene = sapply(strsplit(sapply(strsplit(crap$Protein.Description,"\\s+"),"[[",1),"_"),"[[",1)
+
+
+#Filter Ruan's data for cRAP proteins - 8 removed "ADH1"  "ALBU"  "TRYP"  "K2C1"  "K1C10" "K22E"  "K1C9"  "RS27A"
+ryan.nocrap = hek293.ryan[-which(hek293.ryan$sym %in% crap$gene),]
+
+# Setting up DGEList
+genes = ryan.nocrap[,c(1:6,12)]
+
+data = ryan.nocrap[,c(7:11)]
+rownames(data) = genes$sym
+data[is.na(data)] = 0
+
+samples = data.frame(colnames(data))
+colnames(samples) = "Id"
+samples$Id = as.character(samples$Id)
+samples$Tmt = sapply(strsplit(samples$Id,"\\."),"[[",1)
+samples$Rep = sapply(strsplit(samples$Id,"\\."),"[[",2)
+rownames(samples) = samples$Id
+
+# DGEList object
+library(edgeR)
+x <- DGEList(counts = data,samples=samples,genes=genes)
+
+# QC
+x.norm = clean.data.qc(x,feat = c("Id","Tmt","Rep"),outdir,5)[[1]]
+x.norm$samples$group = x.norm$samples$Tmt
+```
+
+```{r 02_Differential-protein-analysis}
+# -------------------------------------------------------------------------------------------------------------------------------------
+# Step 02: Performing DE analysis between induced and non-induced samples and producing plots
+# -------------------------------------------------------------------------------------------------------------------------------------
+
+# Design matrix
+# First column is used as baseline so swap them such that uninduced is baseline
+des <- model.matrix(~0+x.norm$samples$group)
+colnames(des) <- c("Induced","Uninduced")
+rownames(des) <- rownames(x.norm$samples)
+des = des[,c(2,1)]
+
+# Run single factor DE and plot DE genes
+ascc3.de = runEdgeRsingleF(x.norm,des,"ASCC3-ind-vs-non.ind",pair=c("Uninduced","Induced"),outdir,pval=0.05,logfc=1)
+plotDE(ascc3.de[[1]],x.norm,logfc.col = "logFC",cpm.col = "logCPM",pval.col="PValue",fdr.col="FDR",0.05,1,"ASCC3_ind-vs-non.ind",outdir,"Test")
+```
+
+```{r 03_Setting-up-enrichment-analysis}
+# -------------------------------------------------------------------------------------------------------------------------------------
+# Step 03: Setting up for GO and domain enrichment analysis againt a background of HEK293 proteome from Geiger et al.,
+# -------------------------------------------------------------------------------------------------------------------------------------
+
+# Background list
+hek.bg = read.delim("../03_Leicester-Oligo-dT/2017-09-15_Output/HEK293_Background-list-of-proteins.txt",header=T,sep="\t")
+source("/Users/manasa/Documents/Work/TTT/ThreeTs/proteomics/R/Enrichment.R")
+
+# Map bglist to GO and Interpro IDs
+#hek.qm = myProtMapper(hek.bg$master_protein,out.fields=c("interpro.short_desc","symbol","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"))
+#saveRDS(hek.qm,"Input/HEK293-bg-list-annotated.rds")
+hek.qm = readRDS("Input/HEK293-bg-list-annotated.rds")
+
+# Making gene2cat files for each
+hek.symbol.go = makeGene2Cat(hek.qm,"symbol","go.all",";")
+hek.symbol.doms = makeGene2Cat(hek.qm,"symbol","domains",";")
+
+# Using protein abundance as a bias vector
+hek.bias = data.frame(exp.bias = hek.bg$max,UNIPROT = hek.bg$master_protein,SYMBOL = sapply(strsplit(as.character(hek.bg$protein_description),"\\||\\_"),"[[",3)) # n = 7962
+rownames(hek.bias) = hek.bias$SYMBOL
+
+# Induced and non-induced lists without any DE analysis
+ryan.induced = hek293.ryan[,grep("^Induced|sym",colnames(hek293.ryan))]
+ind = ryan.induced[,c(3,1,2)]
+rownames(ind) = ind$sym
+ind = ind[which(rowSums(ind == 0) != 2),]
+ind = ind[which(rowSums(is.na(ind)) != 2),]
+
+ryan.uninduced = hek293.ryan[,grep("^Uninduced|sym",colnames(hek293.ryan))]
+non.ind = ryan.uninduced[,c(4,1,2,3)]
+rownames(non.ind) = non.ind$sym
+non.ind = non.ind[which(rowSums(non.ind == 0) != 3),]
+non.ind = non.ind[which(rowSums(is.na(non.ind)) != 3),]
+
+# Ryan's list of genes
+i.list = ind$sym
+ni.list = non.ind$sym
+
+# Ryan'd DE list
+de.ryan = ascc3.de[[2]]$sym
+de.ryan.up = ascc3.de[[2]]$sym[which(ascc3.de[[2]]$logFC>0)]
+de.ryan.down = ascc3.de[[2]]$sym[which(ascc3.de[[2]]$logFC<0)]
+```
+
+```{r 04_Running-enrichment-analysis}
+# -------------------------------------------------------------------------------------------------------------------------------------
+# Step 04: Using goseq to run enrichment analysis with both GO and Interpro terms as input
+# -------------------------------------------------------------------------------------------------------------------------------------
+
+# Ryan's list enrichment
+
+# All induced genes
+ryan.i.go = runGoseq(i.list,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.05)
+ryan.i.interpro = runGoseq(i.list,hek.bias,hek.bias$exp.bias,hek.symbol.doms,0.05)
+
+# All non-induced genes
+ryan.ni.go = runGoseq(ni.list,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.05)
+ryan.ni.interpro = runGoseq(ni.list,hek.bias,hek.bias$exp.bias,hek.symbol.doms,0.05)
+
+# DE between induced and non-induced
+ryan.de.go = runGoseq(de.ryan,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.05)
+ryan.de.interpro = runGoseq(de.ryan,hek.bias,hek.bias$exp.bias,hek.symbol.doms,0.05)
+
+# DE for up and down regulated genes separately
+ryan.de.up.go = runGoseq(de.ryan.up,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.05)
+ryan.de.down.go = runGoseq(de.ryan.down,hek.bias,hek.bias$exp.bias,hek.symbol.go,0.05)
+
+# Annotate Ryan's list with gene names
+# Maping Ensembl to gene ids and GO terms
+
+ryan.go.up.genes = ryan.de.up.go[[2]]
+ryan.go.up.genes$numDE = length(de.ryan.up)
+ryan.go.up.genes$numTotal = nrow(hek.bias)
+ryan.go.up.genes$genes = sapply(ryan.go.up.genes$category, function(x) paste(intersect(de.ryan.up,hek.symbol.go$symbol[which(hek.symbol.go$to.id == x)]),collapse="/"))
+ryan.go.up.genes$dir = "Up-in-induced"
+
+ryan.go.down.genes = ryan.de.down.go[[2]]
+ryan.go.down.genes$numDE = length(de.ryan.down)
+ryan.go.down.genes$numTotal = nrow(hek.bias)
+ryan.go.down.genes$genes = sapply(ryan.go.down.genes$category, function(x) paste(intersect(de.ryan.down,hek.symbol.go$symbol[which(hek.symbol.go$to.id == x)]),collapse="/"))
+ryan.go.down.genes$dir = "Down-in-induced"
+
+# Merge results and print to file
+ryan.go.enrich = rbind(ryan.go.up.genes,ryan.go.down.genes)
+ryan.go.enrich$geneRatio = paste(ryan.go.enrich$numDEInCat,ryan.go.enrich$numDE,sep="/")
+ryan.go.enrich$bgRatio = paste(ryan.go.enrich$numInCat,ryan.go.enrich$numTotal,sep="/")
+
+ryan.go.enrich = ryan.go.enrich[,c(1,6:7,12:14,11,2,8)]
+colnames(ryan.go.enrich)[c(4,8,9)] = c("direction","p.value","adj.p.value")
+
+write.table(ryan.go.enrich,paste(outdir,"Ryan-ASCC3-induction-GO-analysis.txt",sep="/"),sep="\t",row.names=F,quote=F)
+#numInCat = length(intersect(hek.bias$SYMBOL,hek.symbol.go$symbol[which(hek.symbol.go$to.id == x)]))
+ 
+```

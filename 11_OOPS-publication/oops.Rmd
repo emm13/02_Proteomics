@@ -1,0 +1,153 @@
+---
+title: "Some final analysis for OOPS publication"
+output: html_document
+---
+
+```{r A_Setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r 00_Initiation}
+#---------------------------------------------------------------------------
+# Author 	      : Manasa Ramakrishna, mr325@le.ac.uk
+# Date started 	: 9th January, 2018
+# Last modified : 9th January, 2018
+# Aim 		      : To take a look at first TMT-labelled MCF10A data on insulin starved and unstarved samples
+# Depends       : On 'tmtFunctions.R'. Make sure they are in the same directory
+# Notes         : Works on data from Veronica's latest TMT-labelled proteomics data
+#--------------------------------------------------------------------------- 
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(mygene)
+library(data.table)
+library(goseq)
+library(gplots)
+library(plyr)
+
+#Setting working directories
+wd = "/Users/manasa/Documents/Work/TTT/02_Proteomics/11_OOPS-publication/"
+setwd(wd)
+getwd()
+
+indir = paste(wd,"Input",sep="/")
+outdir = paste(wd,paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+source("oopsFunctions.R")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+
+```
+
+
+```{r 01_Reading-in-data}
+
+# Counts of how many times each protein has been observed
+# Table showing how many OOPS experiments each protein is seen in three OOPS experiments
+# The three OOPS experiments are (1) Trizol-4step TMT (2) Trizol dosage TMT (3) Cell cycle TMT 
+
+protein_data <- readRDS("/Users/manasa/Documents/Work/TTT/ThreeTs/proteomics/trizol/integration/notebooks/agg_geiger_max.rds")
+rownames(protein_data) = protein_data$master_protein
+protein_counts <- read.table("/Users/manasa/Documents/Work/TTT/ThreeTs/proteomics/trizol/integration/notebooks/protein_counts.tsv", sep="\t", header=TRUE)
+print(table(protein_counts$Freq))
+
+# Present in one OOPS experiment but not others
+one.oops = protein_data$master_protein[which(protein_data$seen_once)] # n = 728
+two.oops = protein_data$master_protein[which(protein_data$seen_twice == TRUE & protein_data$seen_three == FALSE)] # n = 523
+three.oops = protein_data$master_protein[which(protein_data$seen_three)] # n = 1618
+
+# Making a list of universe of proteins which is all Geiger proteins (n=7454)
+u2os.univ = protein_data$master_protein
+univ.ann = myProtMapper(u2os.univ)
+
+univ.go = makeGene2Cat(univ.ann,"query","go.all",";")
+univ.pro = makeGene2Cat(univ.ann,"query","domains",";")
+
+# Run enrichment
+one.go = rungoseq(one.oops,univ.go, u2os.univ, protein_data$Max)
+one.pro = rungoseq(one.oops,univ.pro, u2os.univ, protein_data$Max)
+two.go = rungoseq(two.oops,univ.go, u2os.univ, protein_data$Max)
+two.pro = rungoseq(two.oops,univ.pro, u2os.univ, protein_data$Max)
+three.go = rungoseq(three.oops,univ.go, u2os.univ, protein_data$Max)
+three.pro = rungoseq(three.oops,univ.pro, u2os.univ, protein_data$Max)
+
+# Write to output
+write.table(three.go[[2]],paste(outdir,"GO-enrichment-for-core-Trizol-interactome-n1618.txt",sep="/"),sep="\t",quote=F,row.names=F)
+write.table(three.pro[[2]],paste(outdir,"Interpro-domain-enrichment-for-core-Trizol-interactome-n1618.txt",sep="/"),sep="\t",quote=F,row.names=F)
+
+# RNA and protein binding
+
+go.rbp = univ.go$query[which(univ.go$to.id == "GO:0003723")]
+go.pbp = univ.go$query[which(univ.go$to.id == "GO:0005515")]
+
+v = venn(list(RNA.binding=intersect(three.oops,go.rbp), Protein.binding=intersect(three.oops,go.pbp)))
+
+# Plot SILAC ratios
+
+RBP = attr(v,"intersections")$RNA.binding
+ProtBP = attr(v,"intersections")$Protein.binding
+RBP.Prot = attr(v,"intersections")$`RNA.binding:Protein.binding`
+
+silac = read.delim("Input/normalised_intensity_agg_proteins.tsv",sep="\t",header=T)
+
+merge.rbp = data.frame(rbind(cbind(Group="RBP",Proteins=RBP),cbind(Group="ProtBP",Proteins=ProtBP),cbind(Group="RBP.Prot",Proteins=RBP.Prot)))
+merge.rbp.silac = merge(merge.rbp,silac,by.x="Proteins",by.y = "master_protein")
+
+# Just the 400mJ experiment
+rbp.silac.400 = merge.rbp.silac[which(merge.rbp.silac$dosage == "400"),]
+dim(rbp.silac.400) # 1238/1379 have silac ratios
+
+p = ggplot(rbp.silac.400, aes(Ratio, colour=Group)) + geom_density(size=2)
+print(p)
+
+
+
+# Enrichment within each group
+
+# GO
+compclus = compareCluster(list(RBP,ProtBP,RBP.Prot),fun='enricher', universe = u2os.univ,TERM2GENE = univ.go[,c(2,1)],qvalueCutoff = 0.05)
+compclus@compareClusterResult$Description = goterms[as.data.frame(compclus)$ID]
+compclus@compareClusterResult$Ontology = ont[as.data.frame(compclus)$ID]
+
+#Pro
+compclus.pro = compareCluster(list(RBP = attr(v,"intersections")$RNA.binding, ProtBP = attr(v,"intersections")$Protein.binding,RBP.Prot = attr(v,"intersections")$`RNA.binding:Protein.binding`),fun='enricher', universe = u2os.univ,TERM2GENE = univ.pro[,c(2,1)],qvalueCutoff = 0.05)
+
+# Compare function of  proteins that are GO annotated as RNA-binding, RNA and protein binding and purely Protein-binding
+enricherPlot(data=compclus,N=5,suf="GO-RNABP-vs-protein-binding-three-oops",trunc.len=50,y.size=14,all.size=16)
+enricherPlot(data=compclus.pro,N=10,suf="Interpro-RNABP-vs-protein-binding-three-oops",trunc.len=50,y.size=14,all.size=16)
+
+#--------------------------------------------------------------------------------------------
+# Function: rungoseq
+# Aim:  goseq analysis
+# Input : oops = genelist of interest; g2c = gene to category mapping i.e univ.go or univ.pro
+#--------------------------------------------------------------------------------------------
+
+rungoseq<-function(oops,g2c, u2os.univ, b){
+  
+  all.genes = rep(0,length(u2os.univ))
+  names(all.genes) = u2os.univ
+  all.genes[which(names(all.genes) %in% oops)] = 1
+  print(table(all.genes))
+  
+  pwf = nullp(all.genes,bias.data = b,plot.fit = T)
+  GO.wall = goseq(pwf,gene2cat = g2c)
+  GO.wall$BH = p.adjust(GO.wall$over_represented_pvalue,method = "BH")
+  head(GO.wall)
+  
+  GO.enriched = GO.wall[which(GO.wall$BH <= 0.1),]
+  GO.enriched$geneID = sapply(GO.enriched$category,function(x) paste(intersect(oops,g2c$query[grep(x,g2c$to.id)]),collapse="/"))
+  GO.enriched$Symbol = sapply(GO.enriched$geneID, function(x) paste(bitr(unlist(strsplit(x,"/")),fromType="UNIPROT", toType=c("SYMBOL"), OrgDb=org.Hs.eg.db)$SYMBOL,collapse="/"))
+  
+  return(list(GO.wall,GO.enriched))
+}
+
+
+
+
+```
+

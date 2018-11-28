@@ -1,0 +1,18 @@
+1. Had to add path to ~manasa/.profile
+
+nano ~manasa/.profile
+export PYTHONPATH=$PYTHONPATH:/Users/manasa/Documents/Work/TTT/CamProt/camprot/proteomics/
+Ctrl+O
+source ~manasa/.profile
+
+2. Copy Tom's script to local directory
+cp camprot/scripts/add_master_protein.py ~manasa/Documents/Work/TTT/02_Proteomics/04_First-Latin-LOPIT/
+
+3. Modify script to say
+import fasta as fasta (as Tom's path doesn't say /proteomics)
+
+4. Run script
+python ./add_master_protein.py -i Input/dLOPIT_22plex_PeptideGroups.txt -f ./Input/Human_201701.fasta  -fc Input/cRAP_FullIdentifiers.fasta --peptide-column=Sequence --matches-column="Master Protein Accessions" --matches-separator="; " --log=adding_master_proteins.log --outfile=dLOPIT_22plex_PeptideGroups_reannot.txt --only-swissprot
+
+5. Move modified file to Input folder
+mv dLOPIT_22plex_PeptideGroups_reannot.txt Input/

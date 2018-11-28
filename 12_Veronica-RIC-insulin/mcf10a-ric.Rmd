@@ -1,0 +1,575 @@
+---
+title: "Analysing Veronica's second run of RNA Interactome Capture data for Insulin starvation"
+author: "Manasa Ramakrishna"
+date: "28/08/2018"
+output: html_notebook
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12,fig.height=8,warning=FALSE, message=FALSE)
+#tidy.opts=list(width.cutoff=80)
+```
+
+```{r A_Startup, hide=T,warning=FALSE, message=FALSE}
+#---------------------------------------------------------------------------
+# Author 	      : Manasa Ramakrishna, mr325@le.ac.uk
+# Date started 	: 9th January, 2018
+# Last modified : 9th January, 2018
+# Aim 		      : To take a look at first TMT-labelled MCF10A data on insulin starved and unstarved samples
+# Depends       : On 'tmtFunctions.R'. Make sure they are in the same directory
+# Notes         : Works on data from Veronica's latest TMT-labelled proteomics data
+#--------------------------------------------------------------------------- 
+
+# Invoking libraries
+library(MSnbase)
+library(gplots)
+library(reshape2)
+library(wesanderson)
+library(sva)
+library(splitstackshape)
+#library(GenomicFeatures)
+library(mygene)
+library(ggplot2)
+#library(devtools)
+#install_github("vqv/ggbiplot")
+library(ggbiplot)
+library(limma)
+library(RColorBrewer)
+library(calibrate)
+library(VennDiagram)
+#devtools::install_github("guiastrennec/ggplus")
+library(data.table)
+library(goseq)
+library(ggplus)
+library(pRoloc)
+library(pRolocdata)
+library(pRolocGUI)
+
+
+#Setting working directories
+wd = "/Users/manasa/Documents/Work/TTT/02_Proteomics/12_Veronica-RIC-insulin"
+setwd(wd)
+getwd()
+
+indir = paste(wd,"Input",sep="/")
+outdir = paste(wd,paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+source("mcf10aFunctions.R")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+
+```
+
+```{r 01: RNA-binding-proteins-from-Synapt}
+#------------------------------------------------------------------------------------------------------------------------
+# Step 01: Adding in data from Synapt based, label-free mass spectrometry data from Leicester
+#------------------------------------------------------------------------------------------------------------------------
+
+dat = read.table(paste(indir,"RIC-insulin-data.txt",sep="/"),sep="\t",header=T,stringsAsFactors = F)
+print(dim(dat))
+s = apply(dat[,5:12],2,summary)
+print(s)
+print(summary(rowSums(is.na(dat[,5:12]))))
+
+samples = data.frame(cbind(Source = rep("RIC",8), Samples = colnames(dat)[5:12],RBPs = as.numeric(as.character(nrow(dat))),Missing = as.numeric(s["NA's",])))
+samples$RBPs = as.numeric(as.character(samples$RBPs))
+samples$Missing = as.numeric(as.character(samples$Missing))
+samples$RBPs = samples$RBPs-samples$Missing
+
+
+# Melting the data for a barplot
+ds.melt = melt(samples, id=c("Source", "Samples"))
+ds.melt <- within(ds.melt, Samples <- factor(Samples, levels=c("NCL.A","NCL.B","Unstarved.A","Unstarved.B","Starved.A","Starved.B","Insulin.A","Insulin.B")))
+ds.melt$value = ds.melt$value*100/399
+
+# Drawing a barplot of the relative proportions of Missing and RBPs using DIA and DDA with various callers
+# Missing means "NA" so no abundance values and no peptides for the protein.
+
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Barplot-showing-proportion-of-RBPs-across-conditions-callers.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+p <-ggplot(ds.melt)+ geom_bar(aes(Samples, value,fill=variable),stat = "identity", width = 0.5)+labs(y = "Percentage.of.proteins")+theme_bw()+
+scale_fill_manual("legend", values = c("Missing" = "#541F12", "RBPs" = "#CC8B3C"))+theme(text = element_text(size=15), plot.title = element_text(hjust = 0.5,vjust=0.5),axis.ticks.x = element_blank())+ggtitle("Missing values across the experiments")
+print(p)
+dev.off()
+
+
+```
+1. High number of missing values/NA calls in the non-crosslinked samples  (or) very few RBPS (woo hoo!)
+2. Very low number of missing values/NA calls in crosslinked, Unstarved and Insulin stimulated (or) large number of RBPs
+3. A trend showing a drop in the number of RBPs recovered going from Unstarved cells to Starved cells
+
+These are numbers based on raw data but the data warrants a lot of filtering as we have several missing values and low spectral counts.
+
+```{r 02_RBPs-filter}
+
+#==================================================================================
+# 02 : Filtering RBPs in the data set for most promising candidates
+#==================================================================================
+
+dat$nas = rowSums(is.na(dat[,5:12]))
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 1 : First filter is to remove any proteins who are missing more than 9 values out of 12. This excludes genes where not even a single experimental conditions has a complete set of abundance calls. 
+#----------------------------------------------------------------------------------------------------------------------------------
+filt.1 = dat[which(dat$nas <= 6),]
+table(filt.1$nas)
+# 0   1   2   3   4   5   6 
+# 29  18 279  45  14   5   8
+dim(filt.1) # 398 proteins, only 1 eliminated
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 2 : Then remove common mass spec contaminants and spikeins - keratins, bovine albumin based on CCP list of contaminants
+#----------------------------------------------------------------------------------------------------------------------------------
+contam = read.table("Input/contam.txt",sep="\t",header=F,stringsAsFactors = F)
+filt.2 = filt.1[-which(filt.1$Accession %in% contam$V1),]
+dim(filt.2) # 389 proteins, 9 removed
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 3 : Replace missing values with 0. Ading a column called "zeroes" so I can tell how many were 0 and how many were NAs
+# This is not really a filter but I need to do this to be able to draw a PCA
+#----------------------------------------------------------------------------------------------------------------------------------
+filt.3 = filt.2
+filt.3[is.na(filt.3)] = 0
+filt.3$zeroes = rowSums(filt.3 == 0)
+table(filt.3$zeroes) # maximum of 6 zeroes for any protein
+table(filt.3$nas) # max of 6 nas for any protein meaning only one condition could have values
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 4: Filtering for low expressors. Only keep those genes where the spectral count is greater than 2 in 3 or more samples
+# This ensures that at least one condition has a complete set of abundances (on average)
+#----------------------------------------------------------------------------------------------------------------------------------
+keep.exprs <- rowSums(filt.3[,5:12]>=3)>2 
+filt.4 <- filt.3[keep.exprs,] # 336 proteins
+filt.4$Gene.Name = sapply(strsplit(filt.4$Identified.Proteins..415.,"GN=| PE="),"[[",2)
+rownames(filt.4) = filt.4$Gene.Name
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 5: Just keep the columns with necessary information
+#----------------------------------------------------------------------------------------------------------------------------------
+filt.5 = filt.4[,5:12]
+rownames(filt.5) = filt.4$Accession.Number
+dim(filt.5) # n = 336
+```
+
+We have put the data through 4 steps of filtering - removing rows with mostly NAs, removing contaminants, replacing NAs with 0 and finally, remove genes that are lowly expressed in multiple samples. We now have a set of 336 proteins across the conditions which we'd like to investigate further. To note that the non-crosslinked samples express only a handful of proteins (~10-20) so they won't bve used for comparisons
+
+```{r 03_Plotting-filtered-data}
+
+#==================================================================================
+# 03 : Taking a closer look at filtered data
+#==================================================================================
+
+# Some stats and plots for each caller
+pal = wes_palette("Darjeeling1")
+samples = rep(c("NCL","U","S","IT"),each=2)
+
+#----------------------------------
+# PCA for each caller
+#----------------------------------
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"PCA-plots-1-3-across-samples.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+pca = prcomp(t(filt.5))
+summary(pca)
+p <- ggbiplot(pca,choices=c(1,3), var.axes=F, groups = samples, circle = T,labels=rownames(pca$x),colour = pal[as.factor(samples)])+labs(title = paste("PCA plot for ", "RIC-Scaffold",sep=""))+scale_colour_manual(name = "Condition",values=c("NCL" = "#00A08A","U" = "#F98400","S" = "#F2AD00","IT" = "#FF0000"))+ theme(plot.title = element_text(hjust = 0.5))
+print(p)
+dev.off()
+
+#----------------------------------
+# Draw heatmap of data by caller
+# Can change to better colours
+#----------------------------------
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Heatmaps-of-filtered-data-by-caller.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+heatmap.2(as.matrix(filt.5),col=rev(morecols(50)),trace="none",main="Expression of proteins called based on DIA using SCAFFOLD",scale="row",labRow = rownames(filt.5) ,keysize=1,key.title = "",tracecol="black",cexRow = 0.3,cexCol = 0.8,srtCol =45, dendrogram="column")
+dev.off()
+
+```
+
+```{r 04_Pulling-out-most-interesting-proteins}
+
+#-------------------------------------------------------------------------------------------------------------------------------------
+# Pulling out proteins common to all callers to look at their trend in protein expression (based on venn diagram 'v')
+#-------------------------------------------------------------------------------------------------------------------------------------
+common.prots = filt.5[order(rownames(filt.5)),]
+common.prots$ID = rownames(filt.5)
+common.prots$Mass = as.numeric(sapply(strsplit(filt.4$Molecular.Weight," "),"[[",1))
+write.table(common.prots$ID,paste(outdir,"Filtered-protein-list.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+# Melt the dataframe for ggplot compatibility
+com.melt = melt(common.prots[3:9],id="ID")
+colnames(com.melt)[2:3] = c("Condition","Exp")
+com.melt$Exp = as.numeric(com.melt$Exp)
+com.melt$Tmt = sapply(strsplit(as.character(com.melt$Condition),"\\."),"[[",1)
+com.melt$Tmt = factor(com.melt$Tmt,levels = c('NCL','Unstarved','Starved','Insulin'),ordered = TRUE)
+
+
+# Excludes Isoquant as this is the only absolute quantification and units are in fmol. Rest are spectral counts
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Filtered-common-genes-across-callers-violinplots.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+gg2 = ggplot(data=com.melt,aes(x=Tmt, y=Exp, group = Tmt,fill=Tmt)) + geom_violin() +stat_summary(aes(group=1),fun.y=median, geom="line", color="black", size=0.5,lty = 2) + theme(legend.position="top")+labs(fill = "Treatment")+ scale_fill_manual(values=c("#E2D200","#46ACC8","#E58601","#B40F20"))+facet_wrap(~ID)
+gg10 <- facet_multiple(plot=gg2, facets="ID", ncol = 4, nrow = 4, scales = "free_y")
+dev.off()
+```
+
+
+```{r 05_A-simple-classification}
+# Objective is to classify each of the proteins depending on their trends in expression across conditions
+# 4 conditions - Unstarved, Starved, Insulin treated and can be "Up","Down"
+
+expdat = filt.5[,3:8]
+
+filt.6 = cbind(apply(expdat[,1:2],1,function(x) sum(x)/2),apply(expdat[,3:4],1,function(x) sum(x)/2),apply(expdat[,5:6],1,function(x) sum(x)/2),"")
+colnames(filt.6) = colnames=c("UNSTARVED","STARVED","INS.TREATED","Class")
+filt.6 = as.data.frame(filt.6,stringsAsFactors = F)
+filt.6[,1:3] = apply(filt.6[,1:3],2,function(x) as.numeric(x))
+
+# Add class to each protein
+for (p in 1:nrow(filt.6)){
+  status = ""
+  
+  # Is the trend from Unstarved to Starved up or down ?
+  # This will help us those proteins that respond to Insulin starvation.
+  if(filt.6[p,"UNSTARVED"]<filt.6[p,"STARVED"]){
+    status = paste(status,"UpStarv-",sep="")
+  }
+  else{
+    status = paste(status,"DownStarv-",sep="")
+  }
+  
+  # Is the trend from Starved to Insuin treated up or down ?
+  # This should help us identify proteins that respond to insulin stimulation following starvation. Perhaps some pathways will get turned on again
+  # after being starved off insulin
+  
+  if(filt.6[p,"INS.TREATED"]>filt.6[p,"STARVED"]){
+    status = paste(status,"UpIns-",sep="")
+  }
+  else{
+    status = paste(status,"DownIns-",sep="")
+  }
+  
+  # Is the trend from Unstarved to Insulin treated up or down ?
+  # This should hopefully give us the least number of proteins as ideally, insulin treatment should be almost equivalent to No starvation 
+  
+  if(filt.6[p,"UNSTARVED"]>filt.6[p,"INS.TREATED"]){
+    status = paste(status,"DownReIns",sep="")
+  }
+  else{
+    status = paste(status,"UpReIns",sep="")
+  }  
+  
+  #print(status)
+  filt.6$Class[p] = status
+}
+
+# Now plot the trends
+filt.6$Names = rownames(filt.6)
+melt3 = melt(filt.6, id.vars = c("Names","Class"))
+insgp = ggplot(melt3,aes(x=variable,y=value))+geom_line(aes(col=Class,group=Names))+facet_wrap(~Class,scales = "free_y")
+
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Patterns-of-protein-expression-across-conditions.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+print(insgp)
+dev.off()
+
+write.table(filt.6,paste(outdir,"Raw-expression-MCF10A-with-class-Insulin.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+# Filter those lines where at least one number >=10
+temp = filt.6[which(filt.6$UNSTARVED >=10 | filt.6$STARVED >=10 | filt.6$INS.TREATED >=10),]
+write.table(temp,paste(outdir,"Filtered-expression-gt10-MCF10A-with-class-Insulin.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+```
+
+```{r 05a_Functional-enrichment}
+
+#---------------------------------------------------------------------------------------------------------------
+# Functional enrichment of proteins divided into patterns
+#---------------------------------------------------------------------------------------------------------------
+
+# Reading in whole proteome ids form uniprot to obtain protein length to provide as bias to goseq
+mcf10prot = read.delim("Input/Whole-proteome-all-id-mapping.tab",sep="\t",header=T)
+dim(mcf10prot)
+
+upcom = read.delim(paste(indir,"Filtered-protein-list-uniprot-IDs-336.tab",sep="/"),sep="\t",header=T)
+rownames(upcom) = upcom$Entry
+prots.ann = merge(filt.6,upcom, by.x = "Names", by.y = "Entry.name",all.x=T)
+colnames(prots.ann)[1] = "Uniprot.name"
+colnames(prots.ann)[11] = "Gene.name"
+
+# GO analysis
+univ = mcf10prot$Entry
+univ.ann = readRDS("../14_Vicky-U2OS-insulin/Input/MCF10A-mapped-proteins-kegg.rds")
+univ.ann$kegg.id = sapply(univ.ann$pathway.kegg, function(x) paste0(unique(unlist(x[[1]])),collapse=";"))
+univ.ann$kegg.name = sapply(univ.ann$pathway.kegg, function(x) paste0(unique(unlist(x[[2]])),collapse=";"))
+
+# Make mapping for goseq analysis
+univ.cat.go = makeGene2Cat(univ.ann,"query","go.all",";") 
+univ.cat.doms = makeGene2Cat(univ.ann,"query","domains",";")
+univ.cat.kegg = makeGene2Cat(univ.ann,"query","kegg.name",";")
+
+# Running functional enrichment
+library(goseq)
+all.go = NULL
+all.pro = NULL
+all.kegg = NULL
+
+for(l in unique(prots.ann$Class)){
+  prots = as.character(prots.ann$Entry[which(prots.ann$Class == l)])
+  go = rungoseq(prots,univ.cat.go,univ, b=mcf10prot$Length, 0.05)
+  pro = rungoseq(prots,univ.cat.doms,univ, b=mcf10prot$Length, 0.05)
+  kegg = rungoseq(prots,univ.cat.kegg,univ, b=mcf10prot$Length, 0.05)
+  
+  # Save results  
+  if(nrow(go[[2]])>0){
+    all.go = rbind(all.go,cbind(Cluster=l,go[[2]]))
+  }
+  if(nrow(pro[[2]])>0){
+    all.pro = rbind(all.pro,cbind(Cluster=l,pro[[2]]))
+  }
+  if(nrow(kegg[[2]])>0){
+    all.kegg = rbind(all.kegg,cbind(Cluster=l,kegg[[2]]))
+  }
+}
+
+# Plot enrichments ?
+all.go$Description = paste("(",all.go$ontology,") ",all.go$term,sep="")
+all.pro$Description = all.pro$category
+all.kegg$Description = all.kegg$category
+
+colnames(all.kegg)[3] = colnames(all.pro)[3] = colnames(all.go)[3] = "pvalue"
+
+# Plots
+ego = enricherPlot(all.go,"All-GO-MCF10A-Insulin",N=15,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=9,x.size=6)
+epro = enricherPlot(all.pro,"All-Interpro-MCF10A-Insulin",N=15,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=12,x.size=6)
+ekegg = enricherPlot(all.kegg,"All-KEGG-MCF10A-Insulin",N=15,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=12,x.size=6)
+
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Go-Interpro-KEGG-enrichment-plots.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+print(ego)
+print(epro)
+print(ekegg)
+dev.off()
+
+# Re-order all.go and all.pro
+all.go[1:5,c(1:2,12,15,13,16,3,8:9,20,5:6,10:11,17)]
+all.go.1 = all.go[,c(1:2,12,15,13,16,3,8:9,20,5:6,10:11,17)]
+all.pro[1:5,c(1:2,10,13,11,14,3,5:6,8:9,15)]
+all.pro.1 = all.pro[,c(1:2,10,13,11,14,3,5:6,8:9,15)]
+all.kegg[1:5,c(1:2,10,13,11,14,3,5:6,8:9,15)]
+all.kegg.1 = all.kegg[,c(1:2,10,13,11,14,3,5:6,8:9,15)]
+
+write.table(all.go.1,paste(outdir,"All-Enriched-GO-terms-filt.7.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(all.pro.1,paste(outdir,"All-Enriched-Interpro-domains-filt.7.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(all.kegg.1,paste(outdir,"All-Enriched-KEGG-pathways-filt.7.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+```
+
+```{r}
+# Print protein/gene names
+for(i in unique(prots.ann$Class)){
+  print(i)
+  print(paste(prots.ann$Gene[which(prots.ann$Class == i)],collapse="/"))
+  print(paste(prots.ann$Entry[which(prots.ann$Class == i)],collapse="/"))
+}
+```
+
+
+```{r 05b_Functional-enrichment}
+
+#---------------------------------------------------------------------------------------------------------------
+# Functional enrichment of filt.5 proteins using whole proteome as background
+#---------------------------------------------------------------------------------------------------------------
+
+# Reading in whole proteome ids form uniprot to obtain protein length to provide as bias to goseq
+mcf10prot = read.delim("Input/Whole-proteome-all-id-mapping.tab",sep="\t",header=T)
+dim(mcf10prot)
+
+upcom = read.delim("Input/Filtered-RIC-id-mapping.tab",sep="\t",header=T)
+rownames(upcom) = upcom$Entry
+comprots.ann = merge(common.prots,upcom, by.x = "ID", by.y = "Entry.name",all.x=T)
+colnames(comprots.ann)[1] = "Uniprot.name"
+
+# Checking the overlap with whole proteome. 38/362 are not present in the whole proteome
+# It seems as if MATR3 is misisng from the whole proteome but it just is under a different Uniprot ID which is "A8MXP9" instead of P43243
+miss.wholprot = setdiff(upcom$Entry,mcf10prot$Entry)
+upcom[intersect(upcom$Entry,miss.wholprot),]
+
+# GO analysis
+univ = mcf10prot$Entry
+#univ.ann = myProtMapper(univ)
+#saveRDS(univ.ann,"Input/MCF10A-mapped-proteins.rds")
+univ.ann = readRDS("Input/MCF10A-mapped-proteins.rds")
+
+# Make mapping for goseq analysis
+univ.cat.go = makeGene2Cat(univ.ann,"query","go.all",";") 
+univ.cat.doms = makeGene2Cat(univ.ann,"query","domains",";")
+
+#Run goseq
+library(goseq)
+go.110 = rungoseq(upcom$Entry,univ.cat.go,univ, b=mcf10prot$Length, 0.05)
+pro.110 = rungoseq(upcom$Entry,univ.cat.doms,univ,b=mcf10prot$Length, 0.05)
+  
+write.table(go.110[[2]][,c(1,6:8,4:5,9:10,14,11:12,15)],paste(outdir,"Common-proteins-GO-enrichment.txt",sep="/"),sep="\t",quote=F,row.names=F)
+write.table(pro.110[[2]][,c(1,4:8,12,9:10,13)],paste(outdir,"Common-proteins-Interpro-enrichment.txt",sep="/"),sep="\t",quote=F,row.names=F)
+```
+There is a very nice and convincing enrichment for RBPs in this dataset with half of them being nuclear/nucleolar in existence. 
+
+```{r 06_DE-analysis}
+
+# Set up results directory
+res.dir = paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"All-results",sep="_"),sep="/")
+
+# Create the results directory to make it easier to look through results
+if (exists(res.dir)){
+  print("Results directory exists")
+}else{
+  dir.create(res.dir)
+}
+
+samp.dat = colnames(filt.5)
+samp.dat = cbind(samp.dat,Tag=paste("TMT",1:8,sep=""))
+colnames(samp.dat)[1] = "Sample"
+samp.dat = data.frame(samp.dat,stringsAsFactors = F)
+samp.dat$Rep = rep(c(1,2),2)
+rownames(samp.dat) = samp.dat$Sample
+samp.dat$Sample = sapply(strsplit(samp.dat$Sample,"\\."),"[[",1)
+
+colnames(comprots.ann)[11] = "query"
+colnames(comprots.ann)[12] = "Uniprot.ID"
+rownames(comprots.ann) = comprots.ann$Uniprot.name
+
+# Ordering filt.5 to match comprots.ann
+filt.5 = filt.5[order(rownames(filt.5)),]
+
+# Need to have rownames for both fData and expression matrix in the same order. 
+res <- MSnSet(exprs = as.matrix(filt.5),fData=comprots.ann[10:17],pData = samp.dat)
+fData(res)$gene = sapply(strsplit(as.character(fData(res)$Gene.names), split = " "),"[[",1)
+
+# Design a model matrix
+des = model.matrix(~0+pData(res)$Sample[3:8])
+colnames(des) = gsub("pData\\(res\\)\\$Sample\\[3\\:8\\]","",colnames(des))
+rownames(des) = rownames(pData(res))[3:8]
+
+
+# Making a DGE List instead of an MsnSet
+res2 = DGEList(counts = filt.5[,3:8],group = rep(1:3,each=2),genes=comprots.ann[10:17])
+plotMDS(res2,col=rep(brewer.pal(3, "Set1"),each=2))
+
+# Filtering for low-count genes
+keep <- rowSums(cpm(res2)>1) >= 2
+
+# Calculate normalisation factors that will be included in the linear model for DE analysis
+res2 = calcNormFactors(res2)
+res2 = estimateDisp(res2,des)
+plotBCV(res2)
+
+# Look for DE genes
+fit = glmQLFit(res2, des)
+qlf.1vs2 <-glmQLFTest(fit, contrast=c(1,-1,0))
+qlf.1vs3 <- glmQLFTest(fit, contrast=c(1,0,-1))
+qlf.3vs2 <- glmQLFTest(fit, contrast=c(0,-1,1))
+
+# Hits
+top.1vs2 = topTags(qlf.1vs2,n=Inf,p.value=0.05)
+top.1vs3 = topTags(qlf.1vs3,n=Inf,p.value=0.05)
+top.3vs2 = topTags(qlf.3vs2,n=Inf,p.value=0.05)
+
+# Write to tables
+write.table(cbind(as.data.frame(top.1vs2),filt.5[rownames(top.1vs2),]),paste(res.dir,"DE-genes_Insulin-vs-Starved.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(cbind(as.data.frame(top.1vs3),filt.5[rownames(top.1vs3),]),paste(res.dir,"DE-genes_Insulin-vs-Unstarved.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(cbind(as.data.frame(top.3vs2),filt.5[rownames(top.3vs2),]),paste(res.dir,"DE-genes_Unstarved-vs-Starved.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+# Draw contrasts for groups of interest
+contr <- makeContrasts(
+  Insulin.vs.Starved = Insulin - Starved,
+  Insulin.vs.Unstarved = Insulin - Unstarved, 
+  Starved.vs.Unstarved = Starved - Unstarved,
+  levels = des)
+contr
+
+# Limma with voom
+?voom
+keep <- filterByExpr(filt.5[,3:8],min.count = 3,min.total.count = 6, des)
+v <- voom(filt.5[keep,3:8], des, plot=TRUE)
+lfit <- lmFit(v, des)
+efit <- eBayes(contrasts.fit(lfit, contr))
+summary(decideTests(efit, method="separate"))
+
+data.frame(topTable(efit,coef=1,n=Inf,p.value = 0.05))
+
+
+# Running DE for all comparisons
+limma.cond = runDE(res,des,contr,res.dir,logfc=0.5,pval=0.05)
+
+for(c in colnames(contr)){
+  plotDE(limma.cond[[2]],res,"logFC",cpm.col= NULL,"P.Value","adj.P.Val",pval=0.05,logfc=1,suf=c,out.dir=res.dir,cont.col.names=gsub(".vs.","|",c))
+}
+
+```
+
+
+```{r 07_Functional-analysis-of-DE-genes}
+
+# We are going to use limma.cond[[3]] which contain DE genes for each of the contrasts and then check for enrichment 
+degenes = limma.cond[[3]]
+
+colnames(upcom)[1] = "Query"
+degenes$Entry.name = rownames(degenes)
+
+library(dplyr)
+de.annot = left_join(degenes,upcom)
+
+
+# Run enrichment for each of the sets of genes
+# Could split into up and down reg 
+
+
+all.go = data.frame()
+all.pro = data.frame()
+
+for (c in unique(de.annot$Contrast)){
+  print(c)
+  up = de.annot %>% filter(Contrast== c & logFC > 0) %>% select(Entry)
+  down = de.annot %>% filter(Contrast== c & logFC < 0) %>% select(Entry)
+  
+  p = 1
+  dir = ""
+  for(gset in list(up,down)){
+    if(p == 1){
+      dir = "Up"
+      print("Up")
+      p=p+1
+    }else{
+      dir = "Down"
+      print("Down")
+    }
+    gset = gset[!is.na(gset)]
+    go = rungoseq(gset,univ.cat.go,univ, b=mcf10prot$Length, 0.05)
+    pro = rungoseq(gset,univ.cat.doms,univ,b=mcf10prot$Length, 0.05)
+    
+    if(nrow(go[[2]])>0)
+      #print(go[[2]])
+      all.go = rbind(all.go,cbind(Cluster = c,Direction=dir,go[[2]]))
+    if(nrow(pro[[2]])>0)
+      #print(pro[[2]])
+      all.pro = rbind(all.pro,cbind(Cluster = c,Direction=dir,pro[[2]]))
+  }
+}
+
+# Re-order all.go and all.pro
+all.go[1:5,c(1:2,13:14,16,3,8:9,20,6:7,11:12,17,18)]
+all.go = all.go[,c(1:2,13,16,14,3,8:9,20,6:7,11:12,17,18)]
+all.pro[1:5,c(1:2,11,14,12,3,18,6:7,9:10,15,16)]
+all.pro = all.pro[,c(1:2,11,14,12,3,18,6:7,9:10,15,16)]
+
+write.table(all.go,paste(res.dir,"All-Enriched-GO-terms.txt"),sep="\t",row.names=F,quote=F)
+write.table(all.pro,paste(res.dir,"All-Enriched-Interpro-terms.txt"),sep="\t",row.names=F,quote=F)
+
+
+# Plot enrichments ?
+all.go$Description = paste("(",all.go$ontology,") ",all.go$term,sep="")
+enricherPlot(all.go,"All-GO",N=30,colorBy = "neg.log10.BH",sizeBy = "foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=12,x.size=12)
+
+all.pro$Description = all.pro$category
+enricherPlot(all.pro,"All-Interpro",N=10,colorBy = "neg.log10.BH",sizeBy = "foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=12,x.size=12)
+
+```

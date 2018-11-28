@@ -1,0 +1,452 @@
+---
+title: "tmtUvDose_Extras"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r 02_Mapping-functions}
+# ------------------------------------------------------------------------------------------------------------
+# Step 02: Mapping 'background' as well as 'expressed' list of proteins to various annotations
+# For full list of query fields, see http://mygene.info/clients/ and 'Available fields'
+
+# ------------------------------------------------------------------------------------------------------------
+# Function  : 'myProtMapper' to use the function 'queryMany' from Bioconductor package mygene as fast and most up-to-date
+# Input 
+#       : ids = a character list of ids which can be uniprot, ensembl gene, gene symbol,etc
+#       : id.type = what type of ids have you provided in the 'ids' list. Default = "uniprot"
+#       : outlist = list of ids you want as an output. Default = c("interpro","ensembl.gene","go")
+#       : modify = Logical, Default = T; Would you like to modify fields such as interpro, enseml, go to make them more human readable.
+# Output  : A dataframe with required ids and input ids 
+# ------------------------------------------------------------------------------------------------------------------------
+
+myProtMapper <- function(ids,id.type="uniprot",out.fields=c("interpro.short_desc","ensembl.gene","go.MF.id","go.CC.id","go.BP.id"),modify=T){
+  
+  # Get the mapping
+  qm = queryMany(ids,scopes=id.type,fields=out.fields)
+  
+  # Returning variable
+  ret.qm = NULL
+  
+  # Resolve the mappings to make them human readable
+  if(modify == T){
+    qm$go.all = NULL
+    
+    # Interpro mappings
+    if(is.element("interpro",colnames(qm))){
+      qm$domains = sapply(qm$interpro,function(x) paste(unlist(x),collapse=";"))
+    }
+    else{
+      print("No Interpro domains")
+    }
+    
+    # GO mappings
+    if(!is.na(grep("go",colnames(qm)))){
+      
+      # Grep all the go columns 'go.CC','go.MF','go.BP'
+      f = grep("go",colnames(qm), value=T)
+      
+      for(i in f){
+        print(i)
+        temp = sapply(qm[,i],function(x) paste(unlist(x),collapse=";"))
+        if(temp!=""){
+          if(is.null(qm$go.all)){
+            qm$go.all = temp  
+          }
+          else{
+             qm$go.all = paste(qm$go.all,temp,sep=";")
+          }
+        }else{
+          print(paste("missing",i),sep=" ")
+        }
+      }
+      # Replace any extra separation marks
+      #qm$go.all = gsub("^;","",gsub(";;","",qm$go.all))
+      qm$go.all = gsub("^;","",gsub(";;",";",qm$go.all))
+    }
+    else{
+      print("No GO terms")
+    }
+    
+    # Ensembl.gene mappings
+    if(is.element("ensembl",colnames(qm))){
+      qm$ens = sapply(qm$ensembl,function(x) paste(unlist(x),collapse=";"))
+    }
+    else{
+      print("No Ensembl Ids")
+    }
+    
+    # Return mapped structure with tidy columns
+    ret.qm = qm
+  }
+  else{
+    ret.qm = qm
+  }
+  
+  return(data.frame(ret.qm))
+}
+
+
+# ------------------------------------------------------------------------------------------------------------
+# Function  : 'makeGene2Cat' to produce a 1:1 mapping of uniprot/ensembl/symbols to GO/Interpro terms. 
+#              Will be used as input into the 'goseq' function in the gene2cat slot
+# Input 
+#           : dat = dataframe with ids and go/interpro terms (obtained from myProtMapper)
+#           : from.id =  ids you want to map 'from'. Default = "uniprot"
+#           : to.id =  ids you want to map to c("interpro","ensembl.gene","go")
+#           : splt = symbol you want to split by if there are multiple ids
+# Output  : A two column dataframe with Uniprot ids in the first and Go/Interpro in the second
+# ------------------------------------------------------------------------------------------------------------------------
+
+makeGene2Cat <- function(dat,from.id,to.id,splt){
+  
+  cat.frame = dat[,c(from.id,to.id)]
+  d.dt = data.table(cat.frame,key=colnames(cat.frame[,from.id]))
+  cat.out = data.frame(d.dt[, list(to.id = unlist(strsplit(get(to.id), splt))), by=from.id])
+  cat.out = unique(cat.out)
+  
+  return(cat.out)
+}
+
+# ------------------------------------------------------------------------
+# Function  : runGoseq
+# Aim       : runs goseq on a list of genes
+# Input     : list of genes
+# Output    : enriched list of Interpro domains
+# ------------------------------------------------------------------------
+
+runGoseq <- function(genelist,bglist,bias=NULL,cat.oligo=NULL,signif=0.05){
+
+  # setting up goseq object
+  all.genes.comp = rep(0,nrow(bglist))
+  names(all.genes.comp) = rownames(bglist)
+  all.genes.comp[which(names(all.genes.comp) %in% unique(genelist))] = 1
+  table(all.genes.comp)
+  
+  # Remove missing values
+  comp.no.missing = all.genes.comp[which(!is.na(names(all.genes.comp)))]
+  table(comp.no.missing)
+    
+  # Running the function to calculate weights - with user provided bias or default gene length bias
+  pwf.comp = nullp(comp.no.missing,bias.data = bias)
+  
+  # Running goseq enrichment using default mapping within goseq or user provided mapper
+  goseq.comp.cat = goseq(pwf.comp,gene2cat = cat.oligo)
+  goseq.comp.cat$BH_over_represented_pvalue = p.adjust(goseq.comp.cat$over_represented_pvalue,method = "BH")
+  enriched.goseq.comp.cat = goseq.comp.cat[which(goseq.comp.cat$BH_over_represented_pvalue <= signif),]
+  
+  return(list(goseq.comp.cat,enriched.goseq.comp.cat))
+
+}
+```
+```{r}
+#both= intersect(Trizol, oligodT)
+both.enrich.go = runGoseq(both,bias.df, bias.df$protbias,geiger.cat.go)
+both.enrich.go[[2]][,c(1,6:7,4:5,2,8)]
+both.enrich.interpro = runGoseq(both,bias.df, bias.df$protbias,geiger.cat)
+#write.table(both.enrich,paste(outdir,"oligodT-Trizol-common-genes-Interpro-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+#oligo.only = attr(v,"intersection")$`oligodT` # n = 57
+oligo.only = setdiff(oligodT,Trizol) # n = 57
+oligo.only.enrich.go = runGoseq(oligo.only,bias.df, bias.df$protbias,geiger.cat.go)
+oligo.only.enrich.go[,c(1,6:7,4:5,2,8)]
+oligo.only.enrich.interpro = runGoseq(oligo.only,bias.df, bias.df$protbias,geiger.cat)
+#write.table(oligo.only.enrich,paste(outdir,"oligodT-only-genes-101-Interpro-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+#trizol.only = attr(v,"intersection")$`Trizol` # n = 1543
+trizol.only = setdiff(Trizol,oligodT)
+trizol.only.enrich.go = runGoseq(trizol.only,bias.df, bias.df$protbias,geiger.cat.go)
+trizol.only.enrich.go[,c(1,6:7,4:5,2,8)]
+trizol.only.enrich.interpro = runGoseq(trizol.only,bias.df, bias.df$protbias,geiger.cat)
+#write.table(trizol.only.enrich,paste(outdir,"Trizol-only-genes-1296-Interpro-enrichment.txt",sep="/"),sep="\t",row.names=F,quote=F)
+```
+
+```{r}
+# Convert data table
+# geiger.doms.sym = data.frame(geiger.qm[,c("symbol","domains")])
+# geiger.gos.sym = data.frame(geiger.qm[,c("symbol","go.all")])
+
+# d.dt.sym <- data.table(geiger.doms.sym, key="symbol")
+# geiger.cat.sym <- d.dt.sym[, list(domains = unlist(strsplit(domains, "; "))), by=symbol]
+
+# go.dt.sym = data.table(geiger.gos.sym, key="symbol")
+# geiger.cat.go.sym <- go.dt.sym[, list(go.terms = unlist(strsplit(go.all, "; "))), by=symbol]
+
+# Setting up a 'genes' vector. We've only kept those genes present in u2os as the universe
+# Then we mark all those that are enriched in the analysis as genes of interest (DE if you will)
+# We have 1435 genes out of 1516 that have bias data and go terms
+
+# Running goseq for oligodT which have gene symbols as identifiers
+# rownames(bias.df) = bias.df$SYMBOL
+# oligo crosslinked
+cl.qm = queryMany(oligo.cl,scopes="uniprot",fields=c("ensembl","name","symbol","interpro","go"),species=9606)
+cl.qm$domains = sapply(sapply(cl.qm$interpro,"[[",3),function(x) paste(x,collapse="; "))
+cl.qm$num.rbds = rowSums(sapply(rbd.doms, function(x) grepl(x, cl.qm$domains)))
+cl.qm$which.rbd = apply(sapply(rbd.doms, function(x) grepl(x, cl.qm$domains)),1, function(y) paste(names(which(y==T)),collapse="; "))
+table(cl.qm$num.rbds)
+paste("Percentage of proteins with RNA-binding domains in cl = ",round(100*sum(table(cl.in.nc.qm$num.rbds)[2:4])/sum(table(cl.in.nc.qm$num.rbds)),2),sep="")
+
+# oligo non-crosslinked
+nc.qm = queryMany(oligo.nc$GeneName,scopes="symbol",fields=c("ensembl","name","uniprot","interpro","go"),species=9606)
+nc.qm$domains = sapply(sapply(nc.qm$interpro,"[[",3),function(x) paste(x,collapse="; "))
+nc.qm$num.rbds = rowSums(sapply(rbd.doms, function(x) grepl(x, nc.qm$domains)))
+nc.qm$which.rbd = apply(sapply(rbd.doms, function(x) grepl(x, nc.qm$domains)),1, function(y) paste(names(which(y==T)),collapse="; "))
+
+# oligo cl not in nc
+cl.only.qm = queryMany(oligo.cl$GeneName,scopes="symbol",fields=c("ensembl","name","uniprot","interpro","go"),species=9606)
+cl.only.qm$domains = sapply(sapply(cl.only.qm$interpro,"[[",3),function(x) paste(x,collapse="; "))
+cl.only.qm$num.rbds = rowSums(sapply(rbd.doms, function(x) grepl(x, cl.only.qm$domains)))
+cl.only.qm$which.rbd = apply(sapply(rbd.doms, function(x) grepl(x, cl.only.qm$domains)),1, function(y) paste(names(which(y==T)),collapse="; "))
+
+# Number of proteins with known RBDs
+table(uv.qm$num.rbds) # 315/1780 (18%) that have one or more known RBD domains
+table(geiger.qm$num.rbds) # 707/7574 (9%) that have one or more known RBD domains
+table(cl.qm$num.rbds) # 127/332 (38%) that have one or more known RBD domains
+table(nc.qm$num.rbds) # 28/74 (38%) that have one or more known RBD domains
+table(cl.only.qm$num.rbds) # 99/261 (38%) that have one or more known RBD domains
+
+# Looking at duplicated Ensembl ids
+dups = bias.df.ens.sp[duplicated(bias.df.ens.sp$ens),] 
+
+# Data without duplicates
+bias.no.dups = bias.df.ens.sp[!duplicated(bias.df.ens.sp$ensembl),]
+rownames(bias.no.dups) = bias.no.dups$ensembl
+```
+
+
+```{r 08_Filtering-oligodT-proteins}
+
+# -----------------------------------
+# Some filtering of oligodT proteins
+#------------------------------------
+
+# Filtering for those with Swissprot ids only
+#--------------------------------------------
+
+# 587/762 cross-linked proteins are high confidence and are not missing SwissProt ids
+oligo.cl.sp = oligo.cl.qm[which(!is.na(oligo.cl.qm$uniprot.Swiss.Prot)),]
+length(unique(oligo.cl.sp$uniprot.Swiss.Prot))
+
+# 176/224 non-crosslined proteins are high confidence
+oligo.nc.sp = oligo.nc.qm[which(!is.na(oligo.nc.qm$uniprot.Swiss.Prot)),]
+length(unique(oligo.nc.sp$uniprot.Swiss.Prot))
+
+# Remove mass spec contaminant proteins as we did with Trizol data
+#--------------------------------------------------------------------
+oligo.cl.no.contam = oligo.cl.sp[-which(oligo.cl.sp$uniprot.Swiss.Prot %in% contam$Protein.Group.Accessions),]
+length(unique(oligo.cl.no.contam$uniprot.Swiss.Prot)) # 586 so we removed 1 contaminants ALB not present in 'nc' samples
+
+oligo.nc.no.contam = oligo.nc.sp[-which(oligo.nc.sp$uniprot.Swiss.Prot %in% contam$Protein.Group.Accessions),]
+length(unique(oligo.nc.no.contam$uniprot.Swiss.Prot)) # 172 so we removed 4 contaminants KRT2, KRT10, RPS27A, KRT1
+
+```
+We have two datasets now - oligo.cl.no.contam made of 586 unique proteins and oligo.nc.no.contam made of 172 proteins. Next step is to set up goseq. In the initial run, I forgot that the bias data was from U2OS Geiger rather than our own expression so will implement this.
+
+In addition, we annotate proteins given by their GeneNames/HGNC Symbols to entrezgene id, uniprot id, gene description, interpro domains and trembl ids. Because one gene can be alternatively spliced to multiple proteins, we have a one-to-many mapping and 258 crosslinked genes give us 762 crosslinked proteins. Similarly, 73 non-crosslinked genes give us 224 non-crosslinked proteins 
+
+```{r 09_oligodT-GO-Interpro-enrichment}
+
+# ------------------------------------------------------------------------
+# Function  : runGoseq
+# Aim       : runs goseq on a list of genes
+# Input     : list of genes
+# Output    : enriched list of Interpro domains
+# ------------------------------------------------------------------------
+
+runGoseq <- function(genelist,bglist,bias.dat=NULL,cat.oligo){
+
+  # setting up goseq object
+  all.genes.comp = rep(0,nrow(bglist))
+  names(all.genes.comp) = rownames(bglist)
+  all.genes.comp[which(names(all.genes.comp) %in% unique(genelist))] = 1
+  table(all.genes.comp)
+  
+  # Remove missing values
+  comp.no.missing = all.genes.comp[which(!is.na(names(all.genes.comp)))]
+  table(comp.no.missing)
+  
+    
+  # Running the function to calculate weights. We have no bias information as we did in UV experiment
+  # This is because mass spec was run in detection mode not quantitation mode. 
+  pwf.comp = nullp(comp.no.missing,'hg19','geneSymbol', bias=bias.dat,plot.fit=TRUE)
+  
+  # goseq enrichment with domains for cross-linked samples
+  goseq.comp = goseq(pwf.comp,gene2cat = cat.oligo)
+  goseq.comp$BH_over_represented_pvalue = p.adjust(goseq.comp$over_represented_pvalue,method = "BH")
+  goseq.comp
+  
+  enriched.goseq.comp = goseq.comp[which(goseq.comp$BH_over_represented_pvalue <= 0.05),]
+  return(enriched.goseq.comp)
+
+}
+
+# -----------------------------------------------------------------
+# Running goseq for Interpro domain enrichment (using UniProt IDs)
+# -----------------------------------------------------------------
+
+dt.oligo <- data.table(as.data.frame(geiger.qm[,c("query","domains")]), key="query")
+cat.oligo <- dt.oligo[, list(domains = unlist(strsplit(domains, "; "))), by=query]
+
+enriched.dom.cl.oligo = runGoseq(oligo.cl.no.contam$uniprot.Swiss.Prot, bias.df, bias.df$protbias, cat.oligo)
+enriched.dom.nc.oligo = runGoseq(oligo.nc.no.contam$uniprot.Swiss.Prot, bias.df, bias.df$protbias, cat.oligo)
+
+
+# --------------------------------------------------------
+# Running goseq for GO enrichment (using Gene Symbols)
+# -------------------------------------------------------
+
+# Need to get gene symbols for u2os list
+protbias.sym = rowMax(exprs(agg.u2os))
+names(protbias.sym) = sapply(strsplit(as.character(fData(agg.u2os)$protein_description),"\\||\\_"),"[[",3)
+length(protbias.sym)
+
+bias.df.sym = data.frame(protbias.sym)
+bias.df.sym$SYMBOL = rownames(bias.df.sym)
+head(bias.df.sym)
+
+cat.sym <- bg.list.bm[,c("hgnc_symbol","go_id")]
+
+# Call runGoseq function
+enriched.go.cl.oligo = runGoseq(oligo.cl.no.contam$query, bias.df.sym, bias.df.sym$protbias.sym, cat.sym)
+enriched.go.cl.oligo = enriched.go.cl.oligo[,c(1,6,7,4:5,2,8,3)]
+enriched.go.nc.oligo = runGoseq(oligo.nc.no.contam$query, bias.df.sym, bias.df.sym$protbias.sym, cat.sym)
+enriched.go.nc.oligo = enriched.go.nc.oligo[,c(1,6,7,4:5,2,8,3)]
+
+```
+
+```{r 11_Extras}
+#-------------------
+# goseq with KEGG
+#-------------------
+
+# Restricted to only those proteins that had KEGG mappings in bioMart so not very extensive.
+# Better mapping and analysis with clusterProfiler....
+
+#------------------------------
+# Function : mapPathwayToName
+#------------------------------
+
+mapPathwayToName <- function(organism) {
+  KEGG_PATHWAY_LIST_BASE <- "http://rest.kegg.jp/list/pathway/"
+  pathway_list_REST_url <- paste(KEGG_PATHWAY_LIST_BASE, organism, sep="")
+ 
+  pathway_id_name <- data.frame()
+ 
+  for (line in readLines(pathway_list_REST_url)) {
+    tmp <- strsplit(line, "\t")[[1]]
+    pathway_id <- strsplit(tmp[1], organism)[[1]][2]
+    pathway_name <- tmp[2]
+    pathway_name <- strsplit(pathway_name, "\\s+-\\s+")[[1]][1]
+    pathway_id_name[pathway_id, 1] = pathway_name
+ 
+  }
+ 
+  names(pathway_id_name) <- "pathway_name"
+  pathway_id_name
+}
+
+kegg.names = mapPathwayToName('hsa')
+kegg.list = bg.list.bm[which(bg.list.bm$kegg_enzyme != ""),]
+kegg.list$kegg = sapply(strsplit(kegg.list$kegg_enzyme,"\\+"),"[[",1)
+
+# Check for GO enrichment given the bias data using KEGG mappings
+kegg.all.genes = all.genes[which(names(all.genes) %in% kegg.list$uniprotswissprot)]
+table(kegg.all.genes)
+kegg.bias.df = bias.df[which(bias.df$UNIPROT %in% kegg.list$uniprotswissprot),]
+
+# Go seq based on KEGG 
+#write.table(data.frame(all.genes),"All-genes-for-goseq.txt",sep="\t",row.names=T, quote=F)
+kegg.ids = read.table("Input/All-genes-for-goseq-with-KEGG.txt",sep="\t",header=T)
+
+KEGG.pwf = nullp(all.genes,'hg19','ensGene', bias.data=as.numeric(bias.df$protbias),plot.fit=TRUE)
+KEGG.wall = goseq(KEGG.pwf,gene2cat = kegg.ids[,c(1,2)])
+
+KEGG.wall$BH_over_represented_pvalue = p.adjust(KEGG.wall$over_represented_pvalue,method = "BH")
+KEGG.wall$description = kegg.names[KEGG.wall$category,]
+KEGG.wall = KEGG.wall[,c(1,7,4:5,2,6,3)]
+KEGG.wall
+
+prot.list = as.character(unique(prot.list.bm$entrezgene)) # n = 1516
+bg.list = as.character(unique(bg.list.bm$entrezgene)) # n = 7477
+
+ggo.bp <- enrichGO(gene = prot.list,universe = bg.list,OrgDb = org.Hs.eg.db,ont = "BP",qvalueCutoff = 0.05,readable = TRUE)
+ggo.mf <- enrichGO(gene = prot.list,universe = bg.list,OrgDb = org.Hs.eg.db,ont = "MF",qvalueCutoff = 0.05,readable = TRUE)
+ggo.cc <- enrichGO(gene = prot.list,universe = bg.list,OrgDb = org.Hs.eg.db,ont = "CC",qvalueCutoff = 0.05,readable = TRUE)
+
+ggo = rbind(data.frame(ggo.bp,Ontology="BP"),data.frame(ggo.mf,Ontology="MF"),data.frame(ggo.cc,Ontology="CC"))
+ggo = ggo[,c(1:2,10,3:4,7,5:6)]
+ggo
+dotplot(ggo.mf)
+dotplot(ggo.bp)
+dotplot(ggo.cc)
+head(ggo,n=20)
+
+
+# Doing a KEGG based enrichment for the enriched protein list
+kegg.prot = enrichKEGG(gene = prot.list,universe = bg.list,qvalueCutoff = 0.05)
+kegg.prot = data.frame(kegg.prot)
+kegg.prot = kegg.prot[order(kegg.prot$Count,decreasing=T),]
+
+#-------------------------------------------------------------------------
+# Mapping Geiger U2OS list of proteins to gene domains from Interpro.
+#-------------------------------------------------------------------------
+
+# MyGene.info can be accessed through python as well. 
+library(mygene)
+
+# Example of obtaining gene domains for each gene
+#qm = queryMany(c("A0AVT1","A1L020","A1X283","A5YKK6","A6NHR9","A8MYA2"),scopes="uniprot",fields=c("id","entrezgene","name","symbol","interpro"))
+#qm$domains = sapply(sapply(qm$interpro,"[[",3),function(x) paste(x,collapse="; "))
+#head(qm)               
+
+# Geiger list being annotated with interpro descriptions - fast as done in chunks
+# 7414 uniprot IDs yield 7480 lines of data
+geiger.qm = queryMany(unique(bg.list.bm$uniprotswissprot),scopes="uniprot",fields=c("ensembl","entrezgene","name","symbol","interpro"))
+geiger.qm$domains = sapply(sapply(geiger.qm$interpro,"[[",3),function(x) paste(x,collapse="; "))
+
+#-------------------------------------------------------------------------
+# Mapping Trizol-enriched list of proteins to gene domains from Interpro.
+#-------------------------------------------------------------------------
+# 1495 uniprot IDs yield 1521 lines of data
+uv.qm = queryMany(unique(prot.list.bm$uniprotswissprot),scopes="uniprot",fields=c("ensembl","entrezgene","name","symbol","interpro"))
+uv.qm$domains = sapply(sapply(uv.qm$interpro,"[[",3),function(x) paste(x,collapse="; "))
+
+# 7507 proteins map to 183612 annotated lines
+#bg.list.bm = getBM(attributes = c("uniprotswissprot","ensembl_gene_id","hgnc_symbol","go_id","name_1006","interpro","interpro_short_description","interpro_description"),filters = "uniprotswissprot",values = fData(agg.u2os)$master_protein,mart = ensembl)
+saveRDS(bg.list.bm, file="u2os.bg.list.Rds")
+
+bg.list.bm = readRDS("u2os.bg.list.Rds")
+head(bg.list.bm)
+dim(bg.list.bm)
+length(unique(bg.list.bm$hgnc_symbol)) # 7443
+
+#------------------------------------------------------
+# Mapping Trizol-enriched list of proteins to GO terms
+#------------------------------------------------------
+
+# 7507 proteins map to 183612 annotated lines
+prot.list.bm = getBM(attributes = c("uniprotswissprot","ensembl_gene_id","hgnc_symbol","go_id","name_1006","interpro","interpro_short_description","interpro_description"),filters = "uniprotswissprot",values = fData(qnt.prot)$Master.Protein.Accessions,mart = ensembl)
+saveRDS(bg.list.bm, file="uv.list.Rds")
+
+prot.list.bm = readRDS("uv.list.Rds")
+head(prot.list.bm)
+dim(prot.list.bm) # 46005
+length(unique(prot.list.bm$hgnc_symbol)) # 1518
+
+# Need to map Geiger et al to GO terms, domains
+library(biomaRt)
+ensembl = useMart("ensembl", dataset = "hsapiens_gene_ensembl")
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

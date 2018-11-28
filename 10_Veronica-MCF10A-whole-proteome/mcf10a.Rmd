@@ -1,0 +1,1003 @@
+---
+title: "Analysing the first whole proteome of MCF10A under insulin starved and unstarved conditions"
+output: html_notebook
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12,fig.height=8,warning=FALSE, message=FALSE)
+#tidy.opts=list(width.cutoff=80)
+```
+
+```{r A_Startup, hide=T,warning=FALSE, message=FALSE}
+#---------------------------------------------------------------------------
+# Author 	      : Manasa Ramakrishna, mr325@le.ac.uk
+# Date started 	: 9th January, 2018
+# Last modified : 9th January, 2018
+# Aim 		      : To take a look at first TMT-labelled MCF10A data on insulin starved and unstarved samples
+# Depends       : On 'tmtFunctions.R'. Make sure they are in the same directory
+# Notes         : Works on data from Veronica's latest TMT-labelled proteomics data
+#--------------------------------------------------------------------------- 
+
+# Invoking libraries
+library(MSnbase)
+library(gplots)
+library(reshape2)
+library(wesanderson)
+library(sva)
+library(splitstackshape)
+library(mygene)
+library(clusterProfiler)
+library(zoo)
+library(ggplot2)
+library(ggbiplot)
+library(GGally)
+library(limma)
+library(calibrate)
+library(RColorBrewer)
+library(calibrate)
+library(VennDiagram)
+library(ggplus)
+library(org.Hs.eg.db)
+library(GO.db)
+
+#Setting working directories
+wd = "/Users/manasa/Documents/Work/TTT/02_Proteomics/10_Veronica-MCF10A-whole-proteome/"
+setwd(wd)
+getwd()
+
+indir = paste(wd,"Input",sep="/")
+outdir = paste(wd,paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+source("mcf10aFunctions.R")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+
+```
+Now onto loading some functions....that we have loaded all the packages and functions we need for working with this data, let's move on to the data. 
+
+```{r 00_ReadingData}
+# -----------------------------------------------
+# Step 00: Read data
+# Read in all the data required for analysis
+# -----------------------------------------------
+
+# File of contaminants - proteins to exclude from analysis as are things like keratin, alcohol dehydrogenase etc....
+contam = read.delim("Input/Common contaminant_all.csv",sep=",",header=T)
+
+# Read in the sample file that matches columns to sample contents
+samp.dat = read.delim("Input/samples.txt",sep="\t",header=T)
+
+# Read in the data files that contain peptide level output from Proteome discoverer...
+# Note: The columns that begin with "Found.in.Sample.in" correspond to various samples in the study.
+# Columns of interest are "sequence", "modifications","master.protein.accessions","abundance","quan.info"
+data = read.delim("Input/Peptides_Veronica_TMT_Jan2018_PeptideGroups.txt",sep="\t",comment.char="",as.is=T,header=T)
+
+# The 10th TMT tag was blank so any values should be spurious. Excluding this column entirely.
+# If you look at the histogram, most values are 0 - 53,000 out of 73,000 are 0.
+summary(data[,32])
+hist(data[,32],n=100)
+
+
+# Run Tom's python script to re-annotate proteins with unique master protein identifiers from Swissprot only
+# cd into TTT/CamProt/camprot/proteomics
+# python /Users/manasa/Documents/Work/TTT/02_Proteomics/04_First-Latin-LOPIT/add_master_protein.py -i /Users/manasa/Documents/Work/TTT/02_Proteomics/10_Veronica-MCF10A-whole-proteome/Input/Peptides_Veronica_TMT_Jan2018_PeptideGroups.txt -f /Users/manasa/Documents/Work/TTT/02_Proteomics/04_First-Latin-LOPIT/Input/Human_201701.fasta  -fc /Users/manasa/Documents/Work/TTT/02_Proteomics/04_First-Latin-LOPIT/Input/cRAP_FullIdentifiers.fasta --peptide-column=Sequence --matches-column="Master Protein Accessions" --matches-separator="; " --log=adding_master_proteins.log --outfile=/Users/manasa/Documents/Work/TTT/02_Proteomics/10_Veronica-MCF10A-whole-proteome/Input/Peptides_Veronica_TMT_Jan2018_PeptideGroups_reannot.txt --only-swissprot
+# This script adds a bunch of proteins that Proteome Discoverer has called as "NotUnique". Need to decide whether to keep them or not.
+
+data.reann = read.delim("Input/Peptides_Veronica_TMT_Jan2018_PeptideGroups_reannot.txt",sep="\t",comment.char = "",as.is=T,header=T)
+
+# Subset data to only keep columns of interest
+# I want to add the uniprot annotation of style "DENR_HUMAN" to the data to make it comparable to RBP capture data
+prot.data = data.reann[,c(1:5,10,23:31,33,49:53)]
+prot.data$uniprot = ""
+prot.data$uniprot[which(prot.data$protein_description != "")] = sapply(strsplit(prot.data$protein_description[which(prot.data$protein_description != "")],"\\|"),"[[",3)
+
+# Rename tmt tagged columns with Treatment and Replicate names
+for(i in 1:nrow(samp.dat)){
+  id = grep(samp.dat$TMT[i],colnames(prot.data))
+  colnames(prot.data)[id] = paste(samp.dat$Sample[i],samp.dat$Short.cond[i],samp.dat$Rep[i],sep="_")
+}
+
+dim(prot.data)
+head(prot.data)
+```
+Data has 22 columns and 72869 rows - each row belonging to a peptide abundance value across all 10 samples. We now go through a series of filtering steps to obtain a dataset we can use for downstream analyses. 
+
+Tom's python script re-annotates all peptides to their master proteins and only keeps those that have a unique swissprot ID. 
+Line 390 contains what is a "NonUnique" call by proteome discoverer due to multiple matchs - J3KN67 (TPM3_unreviewed); Q5TCU3(TPM2_unreviewed); Q6ZN40 (TPM1_unreviewed); P67936 (TPM4_Reviewed,Max annotation score); H0YK48(TPM1_unreviewed); A0A087WWU8 (TPM3_unreviewed); H7BYY1(TPM1_unreviewed); K7ENT6 (TPM4_unreviewed). However, Tom's script calls it Unique with assignment 'sp|P67936|TPM4_HUMAN' which is the only reviewed protein so it is worth including these....
+
+```{r 01_Filtering_1}
+
+# ---------------------------------------------------------------------------------
+# Step 01 : Filter 
+# We perform 3 layers of filtering - unique proteins, contaminants,missing values
+# Will re-annotate protein list with Tom's code for unique peptides
+# ---------------------------------------------------------------------------------
+
+# How many unique/non-unique proteins are there. Is there a difference in Proteome Discoverer and Tom's script annotations ? 
+peptide.stats = table(prot.data$Quan.Info,prot.data$unique)
+peptide.stats
+
+# Step 1a : Filter only for those peptides that have a unique master protein. Either 
+# 1. column "quan.info" has to be 'Unique' (or) 
+# 2. quan.info has to be "NonUnique" and "unique"" column == 1 and protein_description is not blank. 
+
+filt.1a = prot.data[which(prot.data$Quan.Info == "Unique" | (prot.data$Quan.Info == "NotUnique" & prot.data$unique == 1 & prot.data$protein_description != "")),]
+dim(filt.1a) #63575 are unique peptides, 2633 are non-unique
+
+# Step 1b : Filter out those proteins that are contaminants from the contaminants list but include those that are not contaminants based on Tom's calls. 
+# Tom's script adds 14 unique proteins (158 peptides) back into the study
+filt.1b = filt.1a[-which(filt.1a$Master.Protein.Accessions %in% contam$Protein.Group.Accessions & (filt.1a$crap_protein == 1)),]
+num.contams = length(which(filt.1a$Master.Protein.Accessions %in% contam$Protein.Group.Accessions & (filt.1a$crap_protein == 1)))
+
+# Stats
+dim(filt.1a) # 66208 in total
+dim(filt.1b) # 65990 filtered peptides
+print(num.contams) # 218 contaminant peptides
+
+# Adding extra information about rows with missing values
+# 98% of rows are complete and have no missing values (n=64373)
+# There are 
+filt.1b$count.missing = rowSums(is.na(filt.1b[,c(7:15)]))
+table(filt.1b$count.missing) 
+
+# Indicating which columns are missing information
+filt.1b$Missing = FALSE
+filt.1b$Missing[which(filt.1b$count.missing > 0)] = TRUE
+head(filt.1b)
+
+
+# Last step is to sort out those proteins that are meant to be unique but have multiple Master.Protein.Acessions
+filt.1c = filt.1b
+filt.1c$Master.Protein.Accessions[which(filt.1c$Quan.Info == "NotUnique")] = filt.1c$master_protein[which(filt.1c$Quan.Info == "NotUnique")]
+
+
+```
+We have a column called "Missing" to identify which peptides have one or more missing values across the 9 samples. "count.missing" tells us how many missing values there are for that peptide.
+    0     1     2     3     4     5     6     7     8 
+64373   442   254   200   140   126   146   139   170 
+
+```{r 02a_Creating-an-MSnSet}
+
+# ---------------------------------------------------------------------------------
+# Step 02a : Creating an MSnSet which is needed for using the MSnbase backage
+# ---------------------------------------------------------------------------------
+
+# The rownames of samp.dat have to be the same as column names in the expression data matrix
+rownames(samp.dat) = paste(samp.dat$Sample,samp.dat$Short.cond,samp.dat$Rep,sep="_")
+
+# Create an MSnSet object
+res <- MSnSet(exprs = as.matrix(filt.1c[,c(7:15)]),fData=filt.1c[,c(6,17,22,19,1:5,18,20:21,23)],pData = samp.dat[,c(2,1,4,6)])
+dim(res)
+res <- res[rowSums(is.na(exprs(res)))!=9,] # exclude peptides without any quantification
+print(res)
+
+# How many missing values per peptide
+table(fData(res)$count.missing)
+colSums(is.na(exprs(res)))
+table(rowSums(is.na(exprs(res))))
+
+# Checking missing values
+table(is.na(res))
+```
+The MSnSet object has been created to include protein abundance values, some metadata and sample information (Insulin treatment in this case)
+
+```{r 02b_Imputing-missing-values}
+
+# ---------------------------------------------------------------------------------
+# Step 02b : Imputing missing values in the protein expression data using 'impute'
+# ---------------------------------------------------------------------------------
+
+# Subsetting only those peptides with one or more missing values
+# Replacing missing values with 0 and non-missing with 1
+# Displaying missing values
+
+miss.many = res[rowSums(is.na(exprs(res)))>=1,] # There are 5949 missing values in the matrix of 590,000 entries so approx 1%. Very small
+exprs(miss.many)[exprs(miss.many) != 0] = 1
+exprs(miss.many)[is.na(exprs(miss.many))] = 0
+
+heatmap.2(exprs(miss.many), col = c("lightgray", "black"),
+            scale = "none", dendrogram = "none",
+            trace = "none", keysize = 0.5, key = FALSE,Colv=F,
+            ColSideColors = rep(c("steelblue", "darkolivegreen","magenta"), times = c(3,3,3)))
+
+# Impute missing values 
+# Imputes values based on nearest neighbours. This means that after the imputation, the mean and median of the data remain the same as before imputation
+impute.res <- MSnbase::impute(res,method = "knn")
+
+# Plot imputed values 
+res.miss = melt(exprs(res))
+colnames(res.miss) = c("Row","Dosage","Abundance_imp")
+
+res.no.miss = melt(exprs(impute.res))
+colnames(res.no.miss) = c("Row","Dosage","Abundance")
+
+# Imputed values
+imp.vals = res.no.miss[which(is.na(res.miss$Abundance_imp)),]
+
+# Some boxplots of the data
+#---------------------------
+
+# All data including missing values
+boxplot(log2(res.miss$Abundance)~as.factor(res.miss$Dosage),las=2,col=rep(c("turquoise", "salmon","palegreen"),times=c(3,3,3)),main="All data including missing values")
+
+# Imputed values/missing values only
+b.imp = boxplot(log2(imp.vals$Abundance)~imp.vals$Dosage,las=2,col=rep(c("turquoise", "salmon","palegreen"),times=c(3,3,3)),main="Imputed values only")
+
+# All data icluding newly imputed values
+boxplot(log2(res.no.miss$Abundance)~as.factor(res.no.miss$Dosage),las=2,col=rep(c("turquoise", "salmon","palegreen"),times=c(3,3,3)),main="All data with imputed values")
+
+```
+
+```{r 03_Normalisation}
+
+# ---------------------------------------------------------------------------------
+# Step 03 : Normalising imputed data using various methods to determine ideal one
+# ---------------------------------------------------------------------------------
+
+
+## ---- plotting function---------
+.plot <- function(x,ttl=NULL) {
+  boxplot(exprs(x),
+          main=ifelse(is.null(ttl),processingData(x)@processing[2],ttl),
+          cex.main=1.5,
+          cex.lab=.5,
+          cex.axis=0.8,
+          cex=.8,
+          las=2)
+  grid()
+}
+
+qnt.max <- normalise(impute.res, "max")
+qnt.sum <- normalise(impute.res, "sum")
+qnt.quant <- normalise(impute.res, "quantiles")
+qnt.qrob <- normalise(impute.res, "quantiles.robust")
+
+# Choosing vsn normalisation
+qnt.vsn <- normalise(impute.res, "vsn")
+
+# Using the plotting function to plot boxplots for all diff types of normalisation methods
+oldmar <- par()$mar
+par(mfrow=c(3,2),mar=c(2.9,2.9,2.9,1))
+.plot(impute.res, ttl = "Non-normalised data")
+.plot(qnt.max, ttl = "Maximum")
+.plot(qnt.sum, ttl = "Sum")
+.plot(qnt.quant, ttl = "Quantile")
+.plot(qnt.qrob, ttl = "Robust quantile")
+.plot(qnt.vsn, ttl = "vsn")
+
+```
+
+Will keep the data from the vsn normalisation for downstream analyses as it normalises the data better than other methods used in this comparison such as "sum", "max", "quantile". 
+
+For all further steps, we will use the object "qnt.vsn"
+
+```{r 04a_Aggregate-to-proteins}
+
+# ---------------------------------------------------------------------------------
+# Step 04a : Aggregate peptide data to protein expression values
+# There is an in-built function called 'combineFeatures' to do thi within MSnBase
+# ---------------------------------------------------------------------------------
+
+# To peptide groups
+#pep.imp <- fData(qnt.vsn)$Sequence
+#qnt.pep.imp <- combineFeatures(qnt.vsn, groupBy = pep.imp, fun = "median") # 61798 features
+#names(fData(qnt.pep.imp)) = gsub("CV\\.","",names(fData(qnt.pep.imp))) # CV needs to be removed a swith the next round of aggregation, another round of "CV" gets added
+
+# To protein groups
+#prot.imp <- fData(qnt.pep.imp)$Master.Protein.Accessions
+#length(unique(prot.imp)) # 5919 proteins present in all 9 samples (some imputed values)
+
+# Aggregating peptide abundance values into protein abundance values
+#qnt.prot.imp <- combineFeatures(qnt.pep.imp, groupBy = prot.imp, fun = "median") # 65590 features
+#qnt.prot.imp
+#dim(qnt.prot.imp) # 5919
+#saveRDS(qnt.prot.imp,file = "Input/Aggregated-whole-proteome-with-imputation.rds")
+
+qnt.prot.imp = readRDS("Input/Aggregated-whole-proteome-with-imputation.rds")
+pData(qnt.prot.imp) = pData(impute.res)
+
+
+# Looking at how the data have been combined
+#head(exprs(qnt.vsn))
+#head(exprs(qnt.prot.imp))
+
+# Basic plots of protein data across samples
+.plot(qnt.prot.imp,ttl="Aggregated-proteins")
+plot(hclust(dist(exprs(t(qnt.prot.imp)))))
+
+# Looking at sample correlations
+cor.prot.imp = cor(exprs(qnt.prot.imp))
+heatmap(cor.prot.imp,cex.main = 0.8)
+
+pairs(x = exprs(qnt.prot.imp), upper.panel=NULL, pch=20)
+
+```
+It is very obvious based on the clustering and heatmaps that the samples are clustering based on the replicate number or the date on which the experiment was performed. This would be considered a batch effect and needs to be accounted for before downstream analyses. 
+
+```{r 04b_Correcting-for-batch-effects }
+
+# ---------------------------------------------------------------------------------
+# Step 04a : Plotting PCAs and correcting for batch effect using ComBat
+# This is to look at variability across samples and within replicates
+# ---------------------------------------------------------------------------------
+
+# Across all 9 samples
+prot.pca.imp = prcomp(t(exprs(qnt.prot.imp)),scale=T)
+summary(prot.pca.imp)
+
+# PCA plot of samples
+# very obvious that samples are separating by date of experiment. Need to correct for this before progressing with analysis
+j <- ggbiplot(prot.pca.imp,choices=c(1,3), var.axes=F, groups = factor(rep(c("starved","Ins.30min","Ins.2hr"),times=c(3,3,3))), circle = T,obs.scale=1,labels=rownames(prot.pca.imp$x))
+print(j)
+
+# Trying to correct for batch effect
+pheno.imp = pData(qnt.prot.imp)
+edata.imp = exprs(qnt.prot.imp)
+feat.imp = featureData(qnt.prot.imp)
+
+# Combat model
+batch.imp = pheno.imp$Rep
+modcombat.imp = model.matrix(~1,data=pheno.imp)
+
+# Batch corrected data. Since data are imputed, there are no missing values and ComBat works.....
+combat_edata.imp = sva::ComBat(dat=edata.imp, batch=batch.imp, mod=modcombat.imp, par.prior=TRUE, prior.plots=T)
+combat.pca.imp = prcomp(t(combat_edata.imp),scale=T)
+
+# PCA plot to check the impact of batch correction
+y <- ggbiplot(combat.pca.imp, choices = c(1,3),var.axes=F, groups = factor(rep(c("starved","Ins.30min","Ins.2hr"),times=c(3,3,3))), circle = T,obs.scale=1,labels=rownames(combat.pca.imp$x))
+print(y)
+
+# Assign batch corrected data to new MsnSet
+combat.qnt.prot.imp = qnt.prot.imp
+exprs(combat.qnt.prot.imp) = combat_edata.imp
+
+# Some plots to check post-batch correction correlations
+cor.combat.prot.imp = cor(exprs(combat.qnt.prot.imp))
+heatmap(cor.combat.prot.imp,cex.main = 0.8)
+plot(hclust(dist(exprs(t(combat.qnt.prot.imp)))))
+
+# Write max expression for each gene to file
+mcf10a.bias = data.frame(cbind(uniprot =rownames(exprs(combat.qnt.prot.imp)),max=round(rowMax(exprs(combat.qnt.prot.imp)),2)))
+b = bitr(geneID = mcf10a.bias$uniprot,fromType = "UNIPROT",toType = "SYMBOL",OrgDb = org.Hs.eg.db,drop=T)
+
+mcf10a.sym = merge(b,mcf10a.bias, by.x = "UNIPROT", by.y = "uniprot")
+write.table(mcf10a.sym,"../../11_NoDS-analysis/NucleolarRBP/Input/mcf10a.bg.list.txt", sep="\t",row.names=F,quote=F)
+
+# Detect most variable and least variable genes
+#vars = vargenes(combat.qnt.prot.imp,"Whole-proteome-imputed",reps=rep(c(1,2,3),each=3),"uniprot")
+
+```
+Looks like PC1 is separating samples based on their replicate number....
+
+```{r 05a_Looking-for-DE-between-groups}
+
+# Design a model matrix
+des = model.matrix(~0+pData(combat.qnt.prot.imp)$Short.cond)
+colnames(des) = gsub("pData\\(combat.qnt.prot.imp\\)\\$Short.cond","",colnames(des))
+rownames(des) = rownames(pData(combat.qnt.prot.imp))
+
+# Draw contrasts for groups of interest
+contr <- makeContrasts(
+  Ins30.vs.starved = Ins.30min - starved,
+  Ins2hr.vs.starved = Ins.2hr - starved, 
+  Ins2hr.vs.Ins30 = Ins.2hr - Ins.30min,
+  levels = des)
+contr
+
+# Set up results directory
+res.dir = paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"All-results",sep="_"),sep="/")
+
+# Create the results directory to make it easier to look through results
+if (exists(res.dir)){
+  print("Results directory exists")
+}else{
+  dir.create(res.dir)
+}
+
+limma.cond = runDE(combat.qnt.prot.imp,des,contr,res.dir,logfc=0.5,pval=0.05)
+head(limma.cond)
+
+
+```
+
+```{r 05b_Protein-annotation-to-GO-Interpro}
+
+#------------------------------------------------------------------------------------------------------------------------
+# Step 06: Mapping list of proteins to various annotations
+#------------------------------------------------------------------------------------------------------------------------
+
+# Using mygene
+qm = queryMany(fData(agg.u2os)$master_protein,scopes="uniprot",fields=c("ensembl","name","symbol","interpro","go"))
+
+```
+
+```{r 06_Analysis-without-imputation}
+# ------------------------------------------------------------------------------------------------------
+# Step 06 : Analysing data without imputing values as imputation masks minimal variability in the data
+# ------------------------------------------------------------------------------------------------------
+
+# Normalise data witout imputation
+# Choosing vsn normalisation
+qnt.vsn.noimp <- normalise(res, "vsn")
+
+
+# Need to aggregate into protein without imputing missing values
+# Aggregation in two steps
+
+# To peptide groups
+#pepnames <- fData(qnt.vsn.noimp)$Sequence
+#qnt.pep <- combineFeatures(qnt.vsn.noimp, groupBy = pepnames, fun = "median") # 61798 features
+#names(fData(qnt.pep)) = gsub("CV\\.","",names(fData(qnt.pep))) # CV needs to be removed a swith the next round of aggregation, another round of "CV" gets added
+
+# To proteins
+#protnames <- fData(qnt.pep)$Master.Protein.Accessions
+
+# Aggregating peptide abundance values into protein abundance values
+#qnt.prot.no.imp <- combineFeatures(qnt.pep, groupBy = protnames, fun = "median")
+#pData(qnt.prot.no.imp) = pData(res)
+#dim(qnt.prot.no.imp) # 5919
+#saveRDS(qnt.prot.no.imp,"Input/Aggregated-whole-proteome-WITHOUT-imputation.rds")
+qnt.prot.no.imp = readRDS("Input/Aggregated-whole-proteome-WITHOUT-imputation.rds")
+
+# Working out which proteins are expressed or not in each of the conditions
+noimp = data.frame(exprs(qnt.prot.no.imp))
+noimp$zero.starved = rowSums(is.na(noimp[,1:3]))
+noimp$zero.30min = rowSums(is.na(noimp[,4:6]))
+noimp$zero.2hr = rowSums(is.na(noimp[,7:9]))
+noimp$all = rowSums(is.na(noimp[,1:9]))
+
+# How many proteins are missing noimp in all three replicates
+apply(noimp[,10:12],2,table)
+
+#---------------------------------------------------------------------------------------------------------------------
+# Filt 1 : Adding a filtering step to remove all proteins which are missing all values in each experimental condition
+# This makes batch correction feasible using ComBat
+#---------------------------------------------------------------------------------------------------------------------
+missing.val = noimp[which(noimp$zero.starved == 3 | noimp$zero.30min == 3 | noimp$zero.2hr == 3),1:9] # 462 Uniprot ids
+missing.val[is.na(missing.val)] = 0
+
+# Plotting missing values
+pal <- wes_palette(21, name = "GrandBudapest", type = "continuous")
+heatmap(as.matrix(missing.val[,1:9]),na.rm=T,col=pal,Rowv=NA,Colv=NA, main = "Missing values across samples",cexRow = 0.6)
+
+#---------------------------------------------------------------------------------------------------
+# Looking for those proteins that are exclusively present in the starved but absent from stimulated.
+#---------------------------------------------------------------------------------------------------
+
+# Looking for those proteins that are exclusively present in one group but not in the other two
+exc.starved = noimp[which(noimp$zero.starved == 0 & noimp$zero.2hr > 1 & noimp$zero.30min > 1),]
+exc.30min = noimp[which(noimp$zero.starved > 1 & noimp$zero.2hr > 1 & noimp$zero.30min == 0),]
+exc.2hr = noimp[which(noimp$zero.starved > 1 & noimp$zero.2hr == 0 & noimp$zero.30min > 1),]
+
+# Merge all exclusive proteins
+excl = rbind(cbind(Condition = "Starved",exc.starved),cbind(Condition = "Ins.30min",exc.30min),cbind(Condition="2hr",exc.2hr))
+heatmap(as.matrix(excl[,2:10],na.rm=T),col=pal,Rowv=NA,Colv=NA, main = "Exclusive values in each group",cexRow = 0.6)
+
+head(excl)
+excl = as.data.frame(excl)
+excl$ID = rownames(excl)
+uni = fData(qnt.prot.no.imp)[which(fData(qnt.prot.no.imp)$Master.Protein.Accession %in% excl$ID),c("Master.Protein.Accessions","uniprot")]
+excl.uni = merge(excl,uni,by.x="ID",by.y="Master.Protein.Accessions",all.x=T,all.y=F)
+
+# Annotate this list
+ann = data.frame(queryMany(rownames(excl),scopes="uniprot",fields=c("ensembl.gene","uniprot.Swiss-Prot","entrezgene","symbol","go.MF.term","go.CC.term","go.BP.term","interpro.desc"),species=9606))
+
+# Modify some annotations
+for(j in c("ensembl","interpro","go.BP","go.CC","go.MF")){
+  name = paste(j,"mod",sep=".")
+  ann[,name] = sapply(ann[,j],function(x) paste(unlist(x),collapse="; "))
+}
+
+# Merge it with original data
+excl.ann = merge(ann,excl.uni,by.x="query",by.y = "ID",all=T)
+
+# Trim down data frame and add extra annotations to make it compatible with the RBP capture data
+final.excl = excl.ann[order(excl.ann$Condition,excl.ann$symbol),c(17,7,1,11,5,12,18:31,13:16)]
+rownames(final.excl) = final.excl$symbol
+heatmap(as.matrix(final.excl[,7:15],na.rm=T),col=pal,Rowv=NA,Colv=NA, main = "Exclusive values in each group",cexRow = 0.8)
+
+exc.melt = melt(final.excl[,c(2,7:15)],id = "symbol")
+colnames(exc.melt) = c("Gene","Condition","Exp")
+exc.melt$Exp = as.numeric(exc.melt$Exp)
+exc.melt$Group = sapply(strsplit(as.character(exc.melt$Condition),"_"),"[[",2)
+
+exc.g = ggplot(data=transform(exc.melt,Gene=factor(Gene,levels=exc.melt$Gene)),aes(x=Condition, y=Exp, group = Gene,color = Group)) + geom_line() + theme(axis.text.x=element_text(angle=90, hjust=1),legend.position="none",plot.title = element_text(hjust = 0.5))+facet_wrap(~Gene,scales="free_y")+labs(title="Expression of proteins exclusive to each condition")
+
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),suf,"Expression-in-exclusive-genes-in-whole-proteome.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+print(exc.g)
+dev.off()
+
+# Try and use clustercompare to look for functional themes
+univ = fData(qnt.prot.no.imp)$Master.Protein.Accessions
+univ.ann = myProtMapper(univ)
+
+# Make mapping for goseq analysis
+univ.cat.go = makeGene2Cat(univ.ann,"query","go.all",";") 
+univ.cat.doms = makeGene2Cat(univ.ann,"query","domains",";")
+
+# Adding more annotations
+goterms <- Term(GOTERM)
+ont<- Ontology(GOTERM)
+
+md.go = compareCluster(query~Condition, data=final.excl,fun='enricher',universe = univ.ann$query,TERM2GENE = univ.cat.go[,c(2,1)],qvalueCutoff = 1) 
+md.go@compareClusterResult$Description = goterms[as.data.frame(md.go)$ID]
+md.go@compareClusterResult$Ontology = ont[as.data.frame(md.go)$ID]
+
+md.go.all = enricher(gene = final.excl$query, universe = univ.ann$query,TERM2GENE = univ.cat.go[,c(2,1)],qvalueCutoff = 1) 
+enricherPlot(md.go.all)
+
+# Write excludive genes to table
+write.table(final.excl,paste(outdir,"Exclusive-proteins-with-data-and-annotations.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+```
+
+
+```{r 07a: RNA-binding-proteins-from-Synapt}
+#------------------------------------------------------------------------------------------------------------------------
+# Step 07: Adding in data from Synapt based, label-free mass spectrometry data from Leicester
+#------------------------------------------------------------------------------------------------------------------------
+
+data.sum = NULL
+all.data = NULL
+
+sink(paste(outdir,"Stats-for-input-files.txt",sep="/"))
+for (f in c("DDA_SCAFFOLD.txt","DIA_SCAFFOLD.txt","DIA_ISOQUANT.txt","DDA_PEAKS.txt")){
+  dat = read.table(paste(indir,f,sep="/"),sep="\t",header=T,stringsAsFactors = F)
+  print(f)
+  print(dim(dat))
+  s = apply(dat[,2:13],2,summary)
+  print(s)
+  print(summary(rowSums(is.na(dat[,2:13]))))
+  d = data.frame(cbind(Source = rep(f,ncol(dat)-1), Samples = colnames(dat)[2:13],Total = as.numeric(nrow(dat)),Missing = as.numeric(s["NA's",])))
+  data.sum = rbind(data.sum,d)
+  all.data = rbind(all.data,cbind(Source = gsub(".txt","",f),dat))
+}
+sink()
+
+# Some modifications
+all.data$Source = as.character(all.data$Source)
+all.data$Acquisition = sapply(strsplit(all.data$Source,"_"),"[[",1)
+all.data$Caller = sapply(strsplit(all.data$Source,"_"),"[[",2)
+mega = all.data[,c(2,15:16,1,3:14)]
+
+head(data.sum)
+head(mega)
+
+# Number of RBPS
+data.sum$Total = as.numeric(as.character(data.sum$Total))
+data.sum$Missing = as.numeric(as.character(data.sum$Missing))
+data.sum$RBPs = data.sum$Total-data.sum$Missing
+str(data.sum)
+
+# Melting the data for a barplot
+ds.melt = melt(data.sum, id=c("Source", "Samples","Total"))
+ds.melt <- within(ds.melt, Samples <- factor(Samples, levels=c("NCL.A","NCL.B","NCL.C","U.A","U.B","U.C","S.A","S.B","S.C","IT.A","IT.B","IT.C")))
+
+# Drawing a barplot of the relative proportions of Missing and RBPs using DIA and DDA with various callers
+# Missing means "NA" so no abundance values and no peptides for the protein.
+
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Barplot-showing-proportion-of-RBPs-across-conditions-callers.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+p <-ggplot(ds.melt, aes(Samples, value)) + geom_bar(stat = "identity", aes(fill = variable))+facet_wrap(~Source,scales="free")+labs(fill = "Number.of.proteins")+theme_bw()+
+scale_fill_manual("legend", values = c("Missing" = "#541F12", "RBPs" = "#CC8B3C"))
+print(p)
+dev.off()
+
+
+```
+Each caller calls a different number of proteins - PEAKS calls the masimum number ~ 3800 while ISOQUANT is most conservative at ~ 220. Except for PEAKS, across all other callers, the trend is 1. High number of missing values/NA calls in the non-crosslinked samples  (or) very few RBPS (woo hoo!)
+2. Very low number of missing values/NA calls in crosslinked, Insulin stimulated (IT.A,IT.B,IT.C) samples (or) large number of RBPs
+3. A trend showing a drop in the number of RBPs recovered going from Unstarved cells (U.A,U.B,U.C) to Starved cells (S.A,S.B,S.C)
+
+These are numbers based on raw data but the data warrants a lot of filtering as we have several missing values and low spectral counts.
+
+```{r 07b_RBPs-filtered-for-each-caller}
+
+#==================================================================================
+# 07b : Filtering RBPs in the data set for most promising candidates
+#==================================================================================
+
+# Start with mega that has all RBP data for all callers and acquisition modes
+# DIA is less specific but more sensitive. DDA is more specific but less sensitive. Therefore, more calls from DIA but also more dross. Fewer, reliable calls from DDA
+head(mega)
+dim(mega)
+mega$nas = rowSums(is.na(mega[,5:16]))
+table(mega$nas,mega$Source)
+dim(mega) # 4766 proteins
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 1 : First filter is to remove any proteins who are missing more than 9 values out of 12. This excludes genes where not even a single experimental conditions has a complete set of abundance calls. 
+#----------------------------------------------------------------------------------------------------------------------------------
+filt.1 = mega[which(mega$nas <= 9),]
+table(filt.1$nas,filt.1$Source)
+dim(filt.1) # 2255 proteins
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 2 : Then remove common mass spec contaminants and spikeins - keratins, bovine albumin based on CCP list of contaminants
+#----------------------------------------------------------------------------------------------------------------------------------
+contam = read.table("Input/contam.txt",sep="\t",header=F,stringsAsFactors = F)
+filt.2 = filt.1[-which(filt.1$Accession %in% contam$V1),]
+table(filt.2$nas,filt.2$Caller)
+dim(filt.2) # 2214 proteins
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 3 : Replace missing values with 0. Ading a column called "zeroes" so I can tell how many were 0 and how many were NAs
+# This is not really a filter but I need to do this to be able to draw a PCA
+#----------------------------------------------------------------------------------------------------------------------------------
+filt.3 = filt.2
+filt.3$zeroes = rowSums(filt.3 == 0)
+filt.3[is.na(filt.3)] = 0
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Filt 4: Filtering for low expressors. Only keep those genes where the spectral count is greater than 2 in 3 or more samples
+# This ensures that at least one condition has a complete set of abundances (on average)
+#----------------------------------------------------------------------------------------------------------------------------------
+keep.exprs <- rowSums(filt.3[,5:16]>3)>=3
+filt.4 <- filt.3[keep.exprs,]
+
+#----------------------------------------------------------------------------------------------------------------------------------
+# Draw density plots showing the pre- and post- filtering distributions of gene expression by sample
+#----------------------------------------------------------------------------------------------------------------------------------
+
+# Set up colours
+nsamples <- 12
+coul <- brewer.pal(12, "Paired")
+col = colorRampPalette(coul)(nsamples)
+
+# Histogram showing removal of low expressing genes
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Density-plots-of-protein-abundance.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+par(mfrow=c(1,2))
+
+# Pre-filtered data (filt.3)
+plot(density(filt.3[,5]), col=col[1], lwd=2, ylim=c(0,1),xaxp=c(0,50,25), las=2, main="", xlab="")
+title(main=paste("A. Raw data (n = 0, ",nrow(filt.3)," proteins)", sep=""), xlab="Spectral count")
+abline(v=0, lty=3)
+for (i in 6:16){
+  den <- density(filt.3[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+legend("topright",colnames(filt.3)[5:16], text.col=col, bty="n",cex=1)
+
+# Post-filtering data (filt.4)
+plot(density(filt.4[,5]), col=col[1], lwd=2, ylim=c(0,1),xaxp=c(0,50,25), las=2, main="", xlab="")
+title(main=paste("B. Filtered data (n = 3, ",nrow(filt.4)," proteins)", sep=""), xlab="Spectral count")
+abline(v=0, lty=3)
+for (i in 6:16){
+  den <- density(filt.4[,i])
+  lines(den$x, den$y, col=col[i], lwd=2)
+}
+legend("topright",colnames(filt.4)[5:16], text.col=col, bty="n",cex=1)
+dev.off()
+
+# Some basic stats on the data before we move on
+table(mega$Source)
+table(filt.1$Source)
+table(filt.2$Source)
+table(filt.3$Source)
+table(filt.4$Source)
+```
+
+We have put the data through 4 steps of filtering - removing rows with mostly NAs, removing contaminants, replacing NAs with 0 and finally, remove genes that are lowly expressed in multiple samples. We now have a set of 979 proteins across the 4 caller/sources which we'd like to investigate further.
+
+```{r 07c_Plotting-filtered-data}
+
+#==================================================================================
+# 07c : Taking a closer look at filtered data
+#==================================================================================
+
+head(filt.4)
+dim(filt.4)
+table(filt.4$Source)
+
+
+# Splitting data by caller/source
+# Normalising within each caller by mean of each sample (columnMeans) as each sample was a separate run of the mass spec
+dia.scaf = filt.4[which(filt.4$Source == "DIA_SCAFFOLD"),]
+#rownames(dia.scaf) = dia.scaf$Accession
+dia.scaf[,5:16] = sweep(dia.scaf[,5:16],2,colMeans(dia.scaf[,5:16]),"/")
+dda.scaf = filt.4[which(filt.4$Source == "DDA_SCAFFOLD"),]
+#rownames(dda.scaf) = dda.scaf$Accession
+dda.scaf[,5:16] = sweep(dda.scaf[,5:16],2,colMeans(dda.scaf[,5:16]),"/")
+dda.peaks = filt.4[which(filt.4$Source == "DDA_PEAKS"),]
+#rownames(dda.peaks) = dda.peaks$Accession
+dda.peaks[,5:16] = sweep(dda.peaks[,5:16],2,colMeans(dda.peaks[,5:16]),"/")
+dia.isoq = filt.4[which(filt.4$Source == "DIA_ISOQUANT"),]
+#rownames(dia.isoq) = dia.isoq$Accession
+dia.isoq[,5:16] = sweep(dia.isoq[,5:16],2,colMeans(dia.isoq[,5:16]),"/")
+
+
+# Some stats and plots for each caller
+pal = wes_palette("Darjeeling")
+samples = rep(c("NCL","U","S","IT"),each=3)
+
+names = c("DIA_SCAFFOLD","DDA_SCAFFOLD","DDA_PEAKS","DIA_ISOQUANT")
+c = 1
+
+#----------------------------------
+# PCA for each caller
+#----------------------------------
+sink(paste(outdir,"Median-value-distribution-across-samples-callers.txt",sep="/"))
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"PCA-plots-across-callers.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+for(m in list(dia.scaf,dda.scaf,dda.peaks,dia.isoq)){
+  tmp = m[,5:16]
+  print(names[c])
+  print("Median value for each sample")
+  print(apply(tmp,2,function(x) median(x,na.rm=TRUE)))
+  print("Number of proteins below median value for each sample")
+  print(apply(tmp,2,function(x) length(x[which(x < median(x,na.rm=TRUE))])))
+
+  pca = prcomp(t(tmp))
+  summary(pca)
+
+  p <- ggbiplot(pca,choices=c(1,2), var.axes=F, groups = samples, circle = T,labels=rownames(pca$x),colour = pal[as.factor(samples)])+labs(title = paste("PCA plot for ", names[c],sep=""))+scale_colour_manual(name = "Condition",values=c("NCL" = "#00A08A","U" = "#F98400","S" = "#F2AD00","IT" = "#FF0000"))+ theme(plot.title = element_text(hjust = 0.5))
+  print(p)
+  
+  c = c+1
+  
+  }
+dev.off()
+sink()
+
+#----------------------------------
+# Venn diagram comparing callers
+#----------------------------------
+v = gplots::venn(list(DDA_SCAFFOLD=unique(dda.scaf$Accession), DIA_SCAFFOLD = unique(dia.scaf$Accession), DDA_PEAKS = unique(dda.peaks$Accession), DIA_ISOQ = unique(dia.isoq$Accession)),show.plot = F)
+
+venn.all = venn.diagram(list(unique(dda.scaf$Accession),unique(dia.scaf$Accession),unique(dda.peaks$Accession), unique(dia.isoq$Accession)), NULL, fill=c("#00A08A","#F98400","#F2AD00","#FF0000"), alpha=c(rep(0.5,4)), cex = 2, cat.cex=1.5, category.names = c("DDA_SCAFFOLD","DIA_SCAFFOLD","DDA_PEAKS","DIA_ISOQ"))
+grid.draw(venn.all)
+
+# Draw venn diagram of protein overlap between callers after filtering
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Venn-diagram-across-callers-with-filtering.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+grid.draw(venn.all)
+dev.off()
+
+#----------------------------------
+# Draw heatmap of data by caller
+# Can change to better colours
+#----------------------------------
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Heatmaps-of-filtered-data-by-caller.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+mypalette <- brewer.pal(11,"RdYlBu")
+morecols <- colorRampPalette(mypalette)
+heatmap.2(as.matrix(dia.scaf[,5:16]),col=rev(morecols(50)),trace="none",main="Expression of proteins called based on DIA using SCAFFOLD",scale="row",labRow = dia.scaf$Accession ,keysize=1,key.title = "",tracecol="black",cexRow = 0.3,dendrogram="column")
+heatmap.2(as.matrix(dda.scaf[,5:16]),col=rev(morecols(50)),trace="none",main="Expression of proteins called based on DDA using SCAFFOLD",scale="row",labRow = dda.scaf$Accession ,keysize=1,key.title = "",tracecol="black",cexRow = 0.3,dendrogram="column")
+heatmap.2(as.matrix(dda.peaks[,5:16]),col=rev(morecols(50)),trace="none",main="Expression of proteins called based on DDA using PEAKS",scale="row",labRow = dda.peaks$Accession ,keysize=1,key.title = "",tracecol="black",cexRow = 0.3,dendrogram="column")
+heatmap.2(as.matrix(dia.isoq[,5:16]),col=rev(morecols(50)),trace="none",main="Expression of proteins called based on DIA using ISOQUANT",scale="row",labRow = dia.isoq$Accession ,keysize=1,key.title = "",tracecol="black",cexRow = 0.3,dendrogram="column")
+dev.off()
+
+```
+
+```{r 07d_Pulling-out-most-interesting-proteins}
+
+#-------------------------------------------------------------------------------------------------------------------------------------
+# Pulling out proteins common to all callers to look at their trend in protein expression (based on venn diagram 'v')
+#-------------------------------------------------------------------------------------------------------------------------------------
+common.prots = filt.4[which(filt.4$Accession %in% attr(v,"intersections")$`DDA_SCAFFOLD:DIA_SCAFFOLD:DDA_PEAKS:DIA_ISOQ`),]
+common.prots = common.prots[order(common.prots$Accession),]
+
+norm.comm = rbind(dia.scaf,dda.scaf,dda.peaks)
+dim(norm.comm)
+norm.comm = norm.comm[which(norm.comm$Accession %in% unique(common.prots$Accession)),]
+dim(norm.comm)
+
+# Melt the dataframe for ggplot compatibility
+com.melt = melt(norm.comm,id = c("Accession","Acquisition","Caller","Source","nas","zeroes"))
+colnames(com.melt)[7:8] = c("Condition","Exp")
+com.melt$Exp = as.numeric(com.melt$Exp)
+com.melt$Tmt = sapply(strsplit(as.character(com.melt$Condition),"\\."),"[[",1)
+com.melt$Tmt = factor(com.melt$Tmt,levels = c('NCL','U','S','IT'),ordered = TRUE)
+
+# Regression
+t = unstack(com.melt,Exp~Source)
+cor(t)
+ggcorr(t,palette = "RdGy",label=T,label_round=3,label_size=6)
+
+
+# Excludes Isoquant as this is the only absolute quantification and units are in fmol. Rest are spectral counts
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Filtered-common-genes-across-callers-violinplot_NO-ISOQUANT.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+gg2 = ggplot(data=com.melt[which(com.melt$Source != "DIA_ISOQUANT"),],aes(x=Tmt, y=Exp, group = Tmt,fill=Tmt)) + geom_violin() +stat_summary(aes(group=1),fun.y=median, geom="line", color="black", size=0.5,lty = 2) + theme(legend.position="top")+labs(fill = "Treatment")+ scale_fill_manual(values=c("#E2D200","#46ACC8","#E58601","#B40F20"))+facet_wrap(~Accession)
+gg10 <- facet_multiple(plot=gg2, facets="Accession", ncol = 4, nrow = 4, scales = "free_y")
+dev.off()
+
+# Reading in mapped IDs from uniprot
+upcom = read.delim("Files-to-send/RBP-capture-common-prots-id-mapping.tab",sep="\t",header=T)
+rownames(upcom) = upcom$Entry
+comprots.ann = merge(common.prots,upcom, by.x = "Accession", by.y = "Entry.name",all.x=T)
+
+# Attempting to cluster the genes
+clusdat = norm.comm[,5:16]
+rownames(clusdat) = paste(norm.comm$Accession,norm.comm$Source,sep=".")
+
+# Drawing a heatmap of most common genes
+col.cell <- pal[as.factor(samples)]
+
+pal2 <- c("#7496D2","#E6A2C5","#CECD7B")
+row.cell = pal2[as.numeric(as.factor(sapply(strsplit(rownames(clusdat),"\\."),"[[",2)))]
+row.labs = gsub("_HUMAN|DIA|DDA|\\.|SCAFFOLD|PEAKS|ISOQUANT|\\_","",rownames(clusdat))
+
+# Plot the heatmap
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Filtered-common-genes-across_HEATMAP.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+hm = heatmap.2(as.matrix(clusdat),col=rev(morecols(50)),trace="none",main="Heatmap of 110 common proteins",ColSideColors=col.cell,RowSideColors = row.cell,scale="row",labRow = row.labs ,keysize=1,key.title = "",tracecol="black",cexRow = 0.2,dendrogram="column")
+dev.off()
+```
+
+```{r 07e_Functional-enrichment}
+
+#---------------------------------------------------------------------------------------------------------------
+# Functional enrichment of 110 proteins using whole proteome as background
+#---------------------------------------------------------------------------------------------------------------
+
+# Reading in whole proteome ids form uniprot to obtain protein length to provide as bias to goseq
+mcf10prot = read.delim("Files-to-send/Whole-proteome-all-id-mapping.tab",sep="\t",header=T)
+dim(mcf10prot)
+
+# Checking the overlap with whole proteome. Of 110 proteins, 100 occur in the whole proteome
+# 10 missing ones are listed below.
+# It seems as if MATR3 is misisng from the whole proteome but it just is under a different Uniprot ID which is "A8MXP9" instead of P43243
+miss.wholprot = setdiff(upcom$Entry,fData(qnt.prot.no.imp)$Master.Protein.Accessions)
+upcom[intersect(upcom$Entry,miss.wholprot),]
+ann[which(ann$uniprot.Swiss.Prot %in% miss.wholprot),]
+
+go.110 = rungoseq(upcom$Entry,univ.cat.go,fData(qnt.prot.no.imp)$Master.Protein.Accessions)
+pro.110 = rungoseq(upcom$Entry,univ.cat.doms,fData(qnt.prot.no.imp)$Master.Protein.Accessions)
+  
+write.table(go.110[[2]][,c(1,6:8,4:5,9:10)],paste(outdir,"Common-proteins-GO-enrichment.txt",sep="/"),sep="\t",quote=F,row.names=F)
+write.table(pro.110[[2]][,c(1,4:8)],paste(outdir,"Common-proteins-Interpro-enrichment.txt",sep="/"),sep="\t",quote=F,row.names=F)
+```
+There is a very nice and convincing enrichment for RBPs in this dataset with half of them being nuclear/nucleolar in existence. 
+
+```{r 07f_Comparison-to-Pineiro}
+
+#---------------------------------------------------------------------------------------------------------------
+# Comparing this list to Mark/David's list to see if this can be an orthogonal validation
+#---------------------------------------------------------------------------------------------------------------
+md = read.delim("Input/MarkDavid-RBPlist.txt",sep="\t",header=T)
+
+md.vero = md[which(md$Uniprot.ID %in% unique(common.prots$Accession)),]
+table(md.vero$RNAPI)
+
+# Merge md, comm.melt and groupings data
+gp = read.table("Input/Common-110-by-group.txt",sep="\t",header=T)
+gp.md = merge(gp,md,by.x="Protein",by.y = "Uniprot.ID")
+gp.md.up = merge(gp.md,upcom[,1:2],by.x="Protein",by.y="Entry.name")
+
+# Check for any difference in groupings
+# There is a larger number of Group1 proteins in RNAPI.dep vs RNAPI.indep samples
+y = as.data.frame.matrix(t(table(gp.md$RNAPI,gp.md$Group)))
+y$Group = rownames(y)
+y$prop.test.pval = round(sapply(1:nrow(y), function(z) prop.test(c(y[z,1],y[z,2]),c(37,64),correct=F, alternative="two.sided")$p.value),4)
+y$total.dep = 37
+y$dep.prop = round(y$dependent/y$total.dep,2)
+y$total.indep = 64
+y$indep.prop = round(y$independent/y$total.indep,2)
+y = y[,c(3,1,5,6,2,7,8,4)]
+
+c = compareCluster(Entry~Group,data = gp.md.up,fun='enricher', universe = fData(qnt.prot.no.imp)$Master.Protein.Accessions,TERM2GENE = univ.cat.go[,c(2,1)],qvalueCutoff = 0.05)
+c@compareClusterResult$Description = goterms[as.data.frame(c)$ID]
+c@compareClusterResult$Ontology = ont[as.data.frame(c)$ID]
+
+d = compareCluster(Entry~Group,data = gp.md.up,fun='enricher', universe = fData(qnt.prot.no.imp)$Master.Protein.Accessions,TERM2GENE = univ.cat.doms[,c(2,1)],qvalueCutoff = 0.05)
+d.df = data.frame(d)
+d.df$symbol = sapply(d.df$geneID, function(x) paste(bitr(unlist(strsplit(x,"/")),fromType="UNIPROT", toType=c("SYMBOL"), OrgDb=org.Hs.eg.db)$SYMBOL,collapse="/"))
+
+
+ego = enricherPlot(data=c,N=5,suf="GO-Across-7-RBP-profile-groups",trunc.len=50,y.size=14,all.size=16)
+epro = enricherPlot(data=d,N=5,suf="GO-Across-7-RBP-profile-groups",trunc.len=50,y.size=14,all.size=16)
+
+c.df = data.frame(c)
+c.df$symbol = sapply(c.df$geneID, function(x) paste(bitr(unlist(strsplit(x,"/")),fromType="UNIPROT", toType=c("SYMBOL"), OrgDb=org.Hs.eg.db)$SYMBOL,collapse="/"))
+
+
+# Split into indep and dependent
+md.vero.dep = as.character(md.vero$Uniprot.ID[which(md.vero$RNAPI == "dependent")])
+md.vero.indep = as.character(md.vero$Uniprot.ID[which(md.vero$RNAPI == "independent")])
+
+# Get the protein spectral counts
+md.vero.dep.rbp = com.melt[which(com.melt$Accession %in% md.vero.dep),]
+md.vero.indep.rbp = com.melt[which(com.melt$Accession %in% md.vero.indep),]
+
+# Plot
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"RNAPI-dependent-common-genes-across-callers-violinplot.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+gg2 = ggplot(data=md.vero.dep.rbp,aes(x=Tmt, y=Exp, group = Tmt,fill=Tmt)) + geom_violin() +stat_summary(aes(group=1),fun.y=median, geom="line", color="black", size=0.5,lty = 2) + theme(legend.position="top")+labs(fill = "Treatment")+ scale_fill_manual(values=c("#E2D200","#46ACC8","#E58601","#B40F20"))+facet_wrap(~Accession)
+gg10 <- facet_multiple(plot=gg2, facets="Accession", ncol = 4, nrow = 4, scales = "free_y")
+dev.off()
+
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"RNAPI-independent-common-genes-across-callers-violinplot.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+gg2 = ggplot(data=md.vero.indep.rbp,aes(x=Tmt, y=Exp, group = Tmt,fill=Tmt)) + geom_violin() +stat_summary(aes(group=1),fun.y=median, geom="line", color="black", size=0.5,lty = 2) + theme(legend.position="top")+labs(fill = "Treatment")+ scale_fill_manual(values=c("#E2D200","#46ACC8","#E58601","#B40F20"))+facet_wrap(~Accession)
+gg10 <- facet_multiple(plot=gg2, facets="Accession", ncol = 4, nrow = 4, scales = "free_y")
+dev.off()
+
+```
+
+```{r 07g_Comparing-110-t0-Trizol}
+
+#---------------------------------------------------------------------------------------------------------------
+# Comparing our list of proteins to those obtained by the Trizol experiment
+#---------------------------------------------------------------------------------------------------------------
+trizol = read.table("Input/MCF10A-trizol-proteome.txt",sep="\t",header=T)
+
+# Compare enriched terms amongst clusters
+tri.go = compareCluster(master_protein~treatment+rep,data = trizol,fun='enricher', universe = fData(qnt.prot.no.imp)$Master.Protein.Accessions,TERM2GENE = univ.cat.go[,c(2,1)],qvalueCutoff = 0.05)
+tri.go@compareClusterResult$Description = goterms[as.data.frame(tri.go)$ID]
+tri.go@compareClusterResult$Ontology = ont[as.data.frame(tri.go)$ID]
+tri.pro = compareCluster(master_protein~treatment+rep,data = trizol,fun='enricher', universe = fData(qnt.prot.no.imp)$Master.Protein.Accessions,TERM2GENE = univ.cat.doms[,c(2,1)],qvalueCutoff = 0.05)
+
+# Compare function of  proteins that are GO annotated as RNA-binding, RNA and protein binding and purely Protein-binding
+enricherPlot(data=tri.go,N=5,suf="Trizol-NCL-CL-5reps-GO-enrichment",trunc.len=50,y.size=14,all.size=16)
+enricherPlot(data=tri.pro,N=5,suf="Trizol-NCL-CL-5reps-Interpro-enrichment",trunc.len=50,y.size=14,all.size=16)
+
+# Cumulative sums for venn diagram
+table(trizol$treatment, trizol$rep)
+cumsum(table(trizol$treatment, trizol$rep)[1,])
+cumsum(table(trizol$treatment, trizol$rep)[2,])+8363
+
+v.cl = gplots::venn(list(CL.1 = trizol$master_protein[1:1492],CL.2 = trizol$master_protein[1493:3114],CL.3 = trizol$master_protein[3115:4723],CL.4 = trizol$master_protein[4724:6736],CL.5 = trizol$master_protein[6737:8363]))
+
+v.ncl = gplots::venn(list(NCL.1 = trizol$master_protein[8364:8779],NCL.2 = trizol$master_protein[8780:9174],NCL.3 = trizol$master_protein[9175:9692],NCL.4 = trizol$master_protein[9693:10259],NCL.5 = trizol$master_protein[10260:10997]))
+
+
+cl.int = attr(v.cl,"intersections")$`CL.1:CL.2:CL.3:CL.4:CL.5`
+ncl.int = attr(v.ncl,"intersections")$`NCL.1:NCL.2:NCL.3:NCL.4:NCL.5`
+
+venn.cl.ncl.at = gplots::venn(list(Crosslinked.in.5reps=cl.int,Non.crosslinked.in.5.reps=ncl.int))
+                           
+venn.cl.ncl = venn.diagram(list(cl.int,ncl.int), NULL, fill=c("#00A08A","#F2AD00"), alpha=c(rep(0.5,2)), cex = 2, cat.cex=1.5, category.names = c("Crosslinked-in-5reps","Non-crosslinked-in-5reps"))
+grid.draw(venn.cl.ncl)
+
+# Clean RBPs : Remove those present in non-crossliked and cross-linked
+clean.cl = attr(venn.cl.ncl.at,"intersections")$Crosslinked.in.5reps # 970
+dirty.cl = attr(venn.cl.ncl.at,"intersections")$`Crosslinked.in.5reps:Non.crosslinked.in.5.reps` # 244
+
+# Intersect with whole proteome list from Veronica
+clean = intersect(clean.cl,fData(qnt.prot.no.imp)$Master.Protein.Accessions) # 922
+dirty = intersect(dirty.cl,fData(qnt.prot.no.imp)$Master.Protein.Accessions) # 230
+
+# Compare enriched terms amongst clean and dirty RBPs
+clean.go = compareCluster(list(clean.rbp=clean,dirty.rbp=dirty),fun='enricher', universe = fData(qnt.prot.no.imp)$Master.Protein.Accessions,TERM2GENE = univ.cat.go[,c(2,1)],qvalueCutoff = 0.05)
+clean.go@compareClusterResult$Description = goterms[as.data.frame(clean.go)$ID]
+clean.go@compareClusterResult$Ontology = ont[as.data.frame(clean.go)$ID]
+clean.pro = compareCluster(list(clean.rbp=clean,dirty.rbp=dirty),fun='enricher', universe = fData(qnt.prot.no.imp)$Master.Protein.Accessions,TERM2GENE = univ.cat.doms[,c(2,1)],qvalueCutoff = 0.05)
+
+# Compare function of  proteins that are GO annotated as RNA-binding, RNA and protein binding and purely Protein-binding
+enricherPlot(data=clean.go,N=10,suf="Trizol-clean-RBPs-GO-enrichment",trunc.len=50,y.size=14,all.size=16)
+enricherPlot(data=clean.pro,N=10,suf="Trizol-clean-RBPs-Interpro-enrichment",trunc.len=50,y.size=14,all.size=16)
+
+
+# Final list of RBPs to use for Vero's RBP comparison is "clean" of length 922. Vero's list is 101.
+oligo.tri.rbp = venn(list(Trizol.RBP=clean,oligoDT.RBP=upcom$Entry))
+oligo.tri.pretty = venn.diagram(list(Trizol.RBP=clean,oligoDT.RBP=upcom$Entry), NULL, fill=c("#E2D200","#46ACC8"), alpha=c(rep(0.5,2)), cex = 2, cat.cex=1.5, category.names = c("Trizol.clean","OligoDT"))
+grid.draw(oligo.tri.pretty)
+```
+
+```{r Function:rungoseq}
+
+#--------------------------------------------------------------------------------------------
+# Function: rungoseq
+# Aim:  goseq analysis
+# Input : oops = genelist of interest; g2c = gene to category mapping i.e univ.go or univ.pro
+#--------------------------------------------------------------------------------------------
+
+rungoseq<-function(oops,g2c, univ){
+  
+  all.genes = rep(0,length(univ))
+  names(all.genes) = univ
+  all.genes[which(names(all.genes) %in% oops)] = 1
+  print(table(all.genes))
+  
+  pwf = nullp(all.genes,bias.data = mcf10prot$Length,plot.fit = T)
+  GO.wall = goseq(pwf,gene2cat = g2c)
+  GO.wall$BH = p.adjust(GO.wall$over_represented_pvalue,method = "BH")
+  head(GO.wall)
+  
+  GO.enriched = GO.wall[which(GO.wall$BH <= 0.1),]
+  GO.enriched$geneID = sapply(GO.enriched$category,function(x) paste(intersect(oops,g2c$query[grep(x,g2c$to.id)]),collapse="/"))
+  GO.enriched$Symbol = sapply(GO.enriched$geneID, function(x) paste(bitr(unlist(strsplit(x,"/")),fromType="UNIPROT", toType=c("SYMBOL"), OrgDb=org.Hs.eg.db)$SYMBOL,collapse="/"))
+  
+  return(list(GO.wall,GO.enriched))
+}
+
+
+
+```

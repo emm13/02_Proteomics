@@ -1,0 +1,535 @@
+---
+title: "oopsRBPs"
+author: "Manasa Ramakrishna"
+date: "31/10/2018"
+output:
+  html_document:
+    toc: yes
+    toc_depth: 3
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+---
+
+```{r global_options, echo=FALSE}
+knitr::opts_chunk$set(fig.width=12,fig.height=8,warning=FALSE, message=FALSE,tidy = TRUE,tidy.opts=list(width.cutoff=50))
+```
+
+## 1. Introduction
+This dataset is the first quick-LOPIT experiment exploring RBPs following the OOPS protocol. Given the small amounts of protein in some LOPIT fractions, the aim is to work out if a Label-free quantitation is a feasible way of analysing these proteins. Labelling with TMT requires that all fractions be scaled down to the lowest one and hence can compromise a full exploration of proteins. 
+
+In the following lines of code, we will:  
+ 1. Look the raw data
+ 2. Filter data to remove those mapping to multiple proteins 
+ 3. Aggregate the data into protein-level quantification
+ 4. Filter the data to remove contaminants  
+ 5. Normalise the data (if needed)  
+ 6. Assess the profiles of proteins across the 20 fractions  
+ 
+***
+We start by installing and loading the libraries required for our analysis. Additionally, tell R where you are running your program by setting your working directory as shown below using the variable 'wd'. We will use this later on. Also make your input and output directories (indir/outdir) as shown below. The input directory called "data" should contain the results file from the mass spectrometry experiment. 
+
+```{r 01_Startup}
+suppressMessages(library(reshape2))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggsci))
+suppressMessages(library(dplyr))
+
+#Setting working directories
+wd = "/Users/manasa/Documents/Work/TTT/02_Proteomics/15_OOPS-Label-Free-RBPs/"
+setwd(wd)
+getwd()
+
+# Declaring input and output directories
+indir = paste(wd,"Input",sep="/")
+outdir = paste(wd,paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+
+```
+
+## 2. Read in the peptide-level quantification
+We'll start by reading the peptide-level quantification data into a dataframe. If we take a look at the colnames of the `peptides` dataframe, we can see we have 56 columns. We'll filter these to only keep the ones that are potantially useful to us. The first 12 columns describe the sequence of the peptide, the modifications which were detected and the protein which the peptide has been assigned to. Columns 33-52 provide the quantification values for the 20 fractions of samples that have gone through qLOPIT followed by OOPS.
+
+Of these columns, we keep 4 information columns and all area-under-the-curve value columns. 
+
+```{r 02_ReadingData}
+
+peptides <- read.table("Input/OOPS_qLOPIT_LabelFree_PeptideGroups.txt", sep="\t", header=T,stringsAsFactors = F)
+colnames(peptides)
+head(peptides)
+
+# Keeping only those that are of use for downstream analysis
+peptides_quant = peptides[,c(3:4,8,10,33:52)]
+colnames(peptides_quant) = gsub(".Sample","",gsub("Area.","",colnames(peptides_quant)))
+dim(peptides_quant)
+
+# How many peptides in each fraction
+missing = colSums(is.na(peptides_quant[,5:24]))
+peptide.nums = nrow(peptides_quant)-missing
+
+# Plot missing/value fractions
+t = cbind("Peptides"=100*peptide.nums/nrow(peptides_quant),"Missing"=100*missing/nrow(peptides_quant))
+tmelt = melt(t)
+colnames(tmelt) = c("Fraction","Type","Percentage")
+
+gmiss = ggplot(tmelt, aes(Fraction,Percentage))
+gmiss+geom_bar(stat = "identity", aes(fill = Type))+ scale_fill_jco() + geom_hline(yintercept=mean(t[,2]),colour="#CD534CFF",size=1) 
+```
+The plot above shows what percentage of peptides have values (blue) and what percentage are missing (yellow) for each of the 20 fractions. The red dotted lines shows the average %Missing which is ~85%. This means that on average, each fraction has values for 15% of total peptides captured across all fractons. 
+
+## 3. Filter data to remove those mapping to multiple proteins or are missing Master.Protein.Accessions
+The "Number.of.Proteins" column in `peptides_quant` tells us how many proteins each peptide has mapped too. We can see that 23,677 map uniquely to one protein while the rest don't. We will filter to remove these multi-mappings as it makes the data less reliable. As you can see from a repeat of the barplots above, we haven't lost a large percentage of peptides to non-uniqueness. 
+
+```{r 03_Removing-multiple-mappings}
+
+# 3a. Remove non-unique peptide mappings
+pep.uniq = peptides_quant %>%
+            filter(Number.of.Proteins == 1 & Master.Protein.Accessions != "")
+
+pep.uniq = data.frame(pep.uniq)
+
+dim(peptides_quant)
+dim(pep.uniq)
+
+# Loss
+non.uniq.perc = 100*(nrow(peptides_quant) - nrow(pep.uniq))/nrow(peptides_quant) # 22.3%
+
+# Re-draw the missing value plots for the filtered data
+miss.uniq = colSums(is.na(pep.uniq[,5:24]))
+miss.rows = rowSums(is.na(pep.uniq[,5:24]))
+uniq.nums = nrow(pep.uniq)-miss.uniq
+
+# Plot missing/value fractions
+t.uniq = cbind("Peptides"=100*uniq.nums/nrow(pep.uniq),"Missing"=100*miss.uniq/nrow(pep.uniq))
+t.uniq.melt = melt(t.uniq)
+colnames(t.uniq.melt) = c("Fraction","Type","Percentage")
+
+guniq = ggplot(t.uniq.melt, aes(Fraction,Percentage))
+guniq+geom_bar(stat = "identity", aes(fill = Type))+ scale_fill_jco() + geom_hline(yintercept=mean(t.uniq[,2]),colour="#CD534CFF",size=1) 
+
+```
+Reference : https://pubs.acs.org/doi/pdf/10.1021/acs.jproteome.5b00981 indicates that it is always better to impute at the peptide level and then aggregate into proteins. We will do this to see if it helps us retain more proteins than we do otherwise. 
+
+First, however, we will remove all peptides where >75% of values (16 or more out of 20) are missing. There are 18208 such peptides out of 22598 - 80% will be removed. Additionally, we will have to remove first and second columns as they have > 80% missing values
+
+```{r 03b_Imputing at the peptide level}
+
+pep.le75 = pep.uniq[which(miss.rows<= 15),]
+
+dat.le75 = pep.le75[,7:24]
+fd.le75 = pep.le75[,1:4]
+pd.le75 = data.frame(Samples=colnames(dat.le75))
+rownames(pd.le75) = pd.le75$Samples
+pd.le75$Organelle = c("Lysosome+someER","Lysosome+someER","Lysosome+someER","Lysosome+someER","Lysosome+ER","ER","ER+Mitochondria","ER+Mitochondria","ER+someMitochondira","Cytoplasm","Nucleus+Histone+Cytoplasm","Nucleus+Histone+Cytoplasm","someNucleus+Cytoplasm","someNucleus+Cytoplasm","Cytoplasm","Cytoplasm","Cytoplasm","Cytoplasm")
+
+# Create MSNSet with data 
+
+suppressMessages(library(MSnbase))
+suppressMessages(library(ggbiplot))
+suppressMessages(library(pRoloc))
+
+pepmsn <- MSnSet(exprs = as.matrix(dat.le75),fData= fd.le75 ,pData = pd.le75)
+
+# Try imputing values
+imp.pepmsn <- impute(pepmsn,"knn")
+
+# Heatmaps
+library(heatmap3)
+temp = dat.le75
+temp[is.na(temp)] = 0
+my_palette <- colorRampPalette(c("yellow", "purple")) (n=20)
+
+# Plots
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Heatmaps-pre-post-peptide-level-imputation.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+heatmap(as.matrix(temp),col=my_palette, Colv=NA) # Before imputation
+heatmap(exprs(imp.pepmsn),col=my_palette, Colv=NA) # After imputation
+dev.off()
+
+# Aggregate post imputation
+imp.prots = combineFeatures(imp.pepmsn,groupBy = fData(imp.pepmsn)$Master.Protein.Accessions,fun = "sum",na.rm=T)
+
+# More filtering steps
+imp.prots = imp.prots[grep("cRAP",rownames(imp.prots),invert=T)] # removing "cRAP" proteins
+contam = read.table("Input/contam.txt",sep="\t",header=F)
+
+# Normalise data
+library(vsn)
+imp.vsn = normalise(imp.prots,"vsn")
+imp.qnt = normalise(imp.prots,"quantiles")
+meanSdPlot(exprs(imp.vsn))
+
+boxplot(exprs(imp.prots),main = "No normalisation")
+boxplot(exprs(imp.qnt),main = "Quantile normalisation")
+boxplot(exprs(imp.vsn),main = "VSN normalisation")
+
+# plot PCA
+plot2D(imp.vsn,fcol=NULL)
+plot2D(imp.vsn,method="hexbin",fcol=NULL)
+
+# Add markers
+mrk <- pRolocmarkers(species = "hsap")
+imp.vsn.mrk = addMarkers(imp.vsn, mrk)
+
+plot2D(imp.vsn.mrk, main = "pRolocmarkers for human")
+addLegend(imp.vsn.mrk, cex = .8, where = "topleft")
+
+# Profile plots
+library(RColorBrewer)
+col =  c("#332288", "#6699CC", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#661100", "#CC6677", "#AA4466", "#882255", "#AA4499")
+
+par(mfrow=c(4,3))
+orgs = unique(fData(imp.vsn.mrk)$markers)
+for(o in 2:length(orgs)){
+  z = imp.vsn.mrk[fData(imp.vsn.mrk)$markers == orgs[o], ]
+  plotDist(z,pcol = col[o], las=2)
+  title(main = orgs[o])
+}
+
+
+# Using supervised learning for classifying new proteins using known markers
+w = table(getMarkers(imp.vsn.mrk, verbose=T))
+w <- 1/w[names(w) != "unknown"]
+
+## 100 rounds of optimisation with five-fold cross-validation
+params <- svmOptimisation(imp.vsn.mrk, fcol = "markers",
+                             times = 100, xval = 5,
+                             class.weights = w)
+
+f1Count(params, 0.6)
+plot(params)
+levelPlot(params)
+
+best <- getParams(params)
+
+# Now to classify the unknown proteins
+hl <- svmClassification(imp.vsn.mrk, params, class.weights = w, fcol = "markers")
+hl <- svmClassification(imp.vsn.mrk, cost = 16, sigma = 0.1, class.weights = w, fcol = "markers")
+
+## set point size of each protein to be proportional to the svm score
+ptsze <- exp(fData(hl)$svm.scores) - 1
+
+## plot new predictions
+plot2D(hl, fcol = "svm", cex = ptsze)
+addLegend(hl, fcol = "svm", where = "bottomleft", bty = "n", cex = 1)
+
+```
+
+## 4. Aggregate peptide-level data to protein level data
+
+We will merge AUC values for multiple peptides belonging to the same protein into one value per sample. We use the function 'summarize_all' in dplyr to do this.  
+
+```{r 04_Aggregating-data}
+
+suppressMessages(library(dplyr))
+
+prot.dat = pep.uniq %>%
+    dplyr::group_by(Master.Protein.Accessions) %>%
+    dplyr::select(F1:F20) %>%
+    dplyr::summarise_all(sum,na.rm=T) %>%
+    data.frame()
+
+# How many proteins are retrieved in each fraction
+barplot(nrow(prot.dat) - colSums(prot.dat==0)[-1],cex.names = 0.6,col="#7AA6DCFF", ylab="Number of proteins", xlab="Fraction")
+```
+
+## 5. Further filtering
+We haven't yet filtered for common proteomics "contaminants" such as proteins from hair, nail etc. There are a few ways of removing these.  
+a. Some are annotated by the prefix "cRAP"
+b. Some map to non-human proteins. Given these are U2OS cells, we expect all to be human. 
+c. Some overlap with our `contam.txt` file
+d. Finally, there are glycoproteins that appear in our list of RNA-binding proteins. We want to flag them to give us the option of removing them from downstream analyses.
+
+```{r 05_Further-filtering}
+
+# Make a copy of prot.dat in case you over-write it 
+store.dat = prot.dat
+
+dim(prot.dat) # n = 2276
+
+# 5a: Remove 'cRAP' proteins
+rownames(prot.dat) = prot.dat$Master.Protein.Accessions
+prot.dat = prot.dat[-grep("cRAP",prot.dat$Master.Protein.Accessions),] # Removing proteins annotate as cRAP in the list
+dim(prot.dat) # n = 2269
+
+# Obtaining more protein-level information from Uniprot
+# This list is uploaded to Uniprot and the additional annotations are downloaded from Uniprot. https://www.uniprot.org/uploadlists/ 
+# Of 2269 proteins, 2221 are human; rest to various other species.
+write.table(data.frame(prot.dat$Master.Protein.Accessions),file=paste(outdir,"Aggregated-protein-list-for-Uniprot.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+# Reading in additional annotations from Uniprot
+uniprot.info = read.delim("Input/Aggregated-proteins-2269-with-uniprot.txt",sep="\t",header=T,stringsAsFactors = F)
+rownames(uniprot.info) = uniprot.info$Entry
+colnames(uniprot.info)[1] = "Query"
+sort(table(uniprot.info$Organism))
+
+# 5b. Remove non-human proteins
+non.human = uniprot.info[which(uniprot.info$Organism != "Homo sapiens (Human)"),"Entry"]
+non.human.prots = merge(uniprot.info[non.human,],prot.dat[non.human,],by.y = "Master.Protein.Accessions",by.x = "Entry")
+prot.dat = prot.dat[-which(prot.dat$Master.Protein.Accessions %in% non.human),]
+dim(prot.dat) # n = 2221
+
+# Merge prot.dat with uniprot information
+human.rbps = merge(uniprot.info,prot.dat,by.x = "Entry", by.y = "Master.Protein.Accessions", all.x = F, all.y=T)
+
+# 5c. Remove any additonal contaminants based on the contamination file
+contam = read.table("Input/contam.txt",sep="\t",header=F)
+
+final.rbps = human.rbps[-which(human.rbps$Entry.name %in% contam$V1),]
+rownames(final.rbps) = final.rbps$Entry
+dim(final.rbps) # n = 2211
+
+# 5d. Plot glycosylation information in barplot from section 04
+final.rbps$is.glyco = FALSE
+final.rbps$is.glyco[which(final.rbps$Glycosylation != "")] = TRUE
+glycomelt = melt(final.rbps[,c(1,10:29)]) %>% filter(value != 0) # Only include those proteins that have an abundance value
+
+# Count of proteins that are glycoproteins
+glycocount = as.data.frame.table(table(glycomelt$variable, glycomelt$is.glyco))
+colnames(glycocount) = c("Fraction","is.glyco","Count")
+
+# Percentage of proteins that are glycoproteins
+glycoperc = as.data.frame.table(100*table(glycomelt$variabl, glycomelt$is.glyco)/rowSums(table(glycomelt$variabl, glycomelt$is.glyco)))
+colnames(glycoperc) = c("Fraction","is.glyco","Percentage")
+glycoperc$is.glyco = factor(glycoperc$is.glyco, levels = c("TRUE","FALSE"))
+
+# Plot barplot
+suppressMessages(library(scales))
+glycobar = ggplot(glycoperc,aes(fill=is.glyco,y=Percentage, x=Fraction)) + geom_col(position="fill")+scale_y_continuous(labels=percent_format())
+glycobar
+```
+
+## 6. Working with MSnSets
+An MsnSet is an object that is used as part of the MSnbase package. It helps explore protein localisation data which is what we have. 
+
+### 6a. Creating an MSnSet
+```{r 06a_Creating-an-MSnSet}
+
+dat = final.rbps %>% dplyr::select(F1:F20) %>% as.matrix()
+fd = final.rbps %>% dplyr::select(Entry:is.glyco)
+pd = data.frame("samples"= colnames(dat))
+rownames(pd) = pd$samples
+
+```
+Based on the Western Blot below, we add some organlle information
+![Western blot for U2OS cells after qLOPIT and OOPS on 20 fractions](Western-blot.jpeg)
+```{r}
+pd$Organelle = c("unknown","Lysosome","Lysosome+someER","Lysosome+someER","Lysosome+someER","Lysosome+someER","Lysosome+ER","ER","ER+Mitochondria","ER+Mitochondria","ER+someMitochondira","Cytoplasm","Nucleus+Histone+Cytoplasm","Nucleus+Histone+Cytoplasm","someNucleus+Cytoplasm","someNucleus+Cytoplasm","Cytoplasm","Cytoplasm","Cytoplasm","Cytoplasm")
+
+# MsnSet creation (with and without glycoproteins)
+rbps.res <- MSnSet(exprs = dat ,fData= fd ,pData = pd) # With glycoproteins, n = 2211
+rbps.noglyc = rbps.res[which(fData(rbps.res)$is.glyco == "FALSE")] # Without glycoproteins, n = 1914
+
+# Amount of protein per fraction
+par(mfrow=c(2,1))
+barplot(colSums(exprs(rbps.res)),col="goldenrod",main = "Total protein abundance by fraction",ylab = "Sum (AUC per protein)",xlab = "Fraction")
+barplot(colSums(exprs(rbps.res))/colSums(exprs(rbps.res) != 0),col="darkred",main = "Average abundance per protein \n by fraction",ylab = "Average protein abundance",xlab = "Fraction")
+
+# How many missing values per fraction out of a total of 2211 proteins ?
+colSums(exprs(rbps.res) != 0)
+colSums(exprs(rbps.noglyc) != 0)
+```
+
+### 6b. Imputing missing values
+As you can see from the last two outputs, there are a LOT of missing values in the dataset irrespective of how many glycoproteins are present. A way to overcome this problem is to impute missing values from those that are not missing. To do this, we will have to remove non-informative rows/columns or columns that are pretty much zeroes.
+
+```{r 06b_Imputing-missing-values}
+
+suppressMessages(library(pRoloc))
+suppressMessages(library(imputeLCMD))
+
+# Pre imputation
+heatmap(exprs(rbps.res),col = rev(gray.colors(2)),Colv=NA)
+heatmap(exprs(rbps.noglyc),col = rev(gray.colors(2)),Colv=NA)
+plot2D(rbps.res,fcol=NULL)
+plot2D(rbps.noglyc,fcol=NULL)
+
+# How many rows are complete ?
+table(rowSums(exprs(rbps.res)==0))
+colSums(exprs(rbps.res)==0)
+
+# Filter rows with <60% fractions containing missing values i.e at least 8/20 fractions have values
+filtCols = MSnSet(exprs = dat[,c(3:4,6:20)] ,fData=fd,pData = pd[c(3:4,6:20),]) # With glycoproteins, n = 2211
+filt60 = filtCols[which(rowSums(exprs(filtCols)==0)<=12)]
+filt50 = filtCols[which(rowSums(exprs(filtCols)==0)<=10)]
+
+# More heatmaps
+heatmap(exprs(filt60),col = rev(gray.colors(2)),Colv=NA)
+heatmap(exprs(filt50),col = rev(gray.colors(2)),Colv=NA)
+
+impute.rbps = impute(filt50,"knn")
+heatmap(exprs(impute.rbps),col = rev(gray.colors(2)),Colv=NA)
+plot2D(impute.rbps,fcol=NULL)
+
+```
+
+```{r 06c_Normalise-values}
+# Normalise
+rbps.norm = normalise(filt50,"vsn")
+#meanSdPlot(log.na(exprs(rbps.norm)))
+
+# Drawing some plots
+suppressMessages(library(pRoloc))
+plot2D(rbps.norm, fcol = NULL, col = "black")
+plot2D(rbps.norm, method = "hexbin")
+
+# Using proLoc markers
+## Use human markers
+mrk <- pRolocmarkers(species = "hsap")
+rbps.norm = addMarkers(rbps.norm, mrk)
+rbps.res = addMarkers(rbps.res,mrk)
+filt50 = addMarkers(filt50,mrk)
+filt60 = addMarkers(filt60,mrk)
+filtCols = addMarkers(filtCols,mrk)
+rbps.noglyc = addMarkers(rbps.noglyc,mrk)
+
+par(mfrow = c(1, 1))
+plot2D(rbps.norm, main = "pRolocmarkers for human")
+addLegend(rbps.norm, cex = .6, where = "bottomright")
+
+#t-SNE plots
+suppressMessages(library(Rtsne))
+suppressMessages(library(nipals))
+plot2D(rbps.norm, main = "pRolocmarkers for human")
+addLegend(rbps.norm, cex = 1, where = "bottomleft")
+
+# Distance plots
+library(RColorBrewer)
+
+col =  c("#332288", "#6699CC", "#88CCEE", "#44AA99", "#117733", "#999933", "#DDCC77", "#661100", "#CC6677", "#AA4466", "#882255", "#AA4499") #brewer.pal(n = length(orgs), name = 'Paired')
+#rainbow(length(orgs))
+
+orgs = unique(sort(fData(rbps.res)$markers))[c(1,2:12)]
+
+# Profile plots with glycoproteins
+pdf(paste(outdir,"Profile-plots-with-glycoproteins.pdf",sep="/"),paper="a4r",width=12,height=8)
+par(mfrow=c(4,3))
+for(o in 1:length(orgs)){
+  z = rbps.res[fData(rbps.res)$markers == orgs[o], ]
+  plotDist(z,pcol = col[o], las=2)
+  title(main = paste(orgs[o]," (n = ",nrow(z),")",sep=""))
+}
+dev.off()
+
+
+pdf(paste(outdir,"Profile-plots-no-glycoproteins.pdf",sep="/"),paper="a4r",width=12,height=8)
+par(mfrow=c(4,3))
+temp.orgs = orgs[orgs %in% unique(sort(fData(rbps.noglyc)$markers))]
+for(o in 1:length(orgs)){
+  z = rbps.noglyc[fData(rbps.noglyc)$markers == orgs[o], ]
+  plotDist(z,pcol = col[o], las=2)
+   title(main = paste(orgs[o]," (n = ",nrow(z),")",sep=""))
+}
+dev.off()
+
+
+
+
+```
+
+
+```{r Enrichment-analysis}
+
+# Background list
+u2os.bg = read.delim("Input/U2OS_Background-list-of-proteins.txt",header=T,sep="\t",stringsAsFactors = F)
+rownames(u2os.bg) = u2os.bg$master_protein
+
+# Source functionsu
+source("mcf10aFunctions.R")
+suppressWarnings(library(mygene))
+
+# Building background of U2OS proteins from Geiger et al.
+univ = u2os.bg$master_protein
+univ.ann = myProtMapper(univ,out.fields=c("interpro.short_desc","ensembl.gene","go.MF.id","go.CC.id","go.BP.id","pathway.kegg"))
+univ.ann$kegg.id = sapply(univ.ann$pathway.kegg, function(x) paste0(unique(unlist(x[[1]])),collapse=";"))
+univ.ann$kegg.name = sapply(univ.ann$pathway.kegg, function(x) paste0(unique(unlist(x[[2]])),collapse=";"))
+
+# Make mapping for goseq analysis
+suppressMessages(library(data.table))
+univ.cat.go = makeGene2Cat(univ.ann,"query","go.all",";") 
+univ.cat.doms = makeGene2Cat(univ.ann,"query","domains",";")
+univ.cat.kegg = makeGene2Cat(univ.ann,"query","kegg.name",";")
+
+# Running enrichment per channel
+channels = pData(rbps.noglyc)$samples
+
+# Running functional enrichment
+library(goseq)
+all.go = NULL
+all.pro = NULL
+all.kegg = NULL
+
+for(l in 1:length(channels)){
+  prots = names(which(exprs(rbps.res)[,channels[l]] != 0))
+  go = rungoseq(prots,univ.cat.go,univ, b=u2os.bg$max, 0.05)
+  pro = rungoseq(prots,univ.cat.doms,univ, b=u2os.bg$max, 0.05)
+  kegg = rungoseq(prots,univ.cat.kegg,univ, b=u2os.bg$max, 0.05)
+  
+  # Save results  
+  if(nrow(go[[2]])>0){
+    all.go = rbind(all.go,cbind(Cluster=channels[l],go[[2]]))
+  }
+  if(nrow(pro[[2]])>0){
+    all.pro = rbind(all.pro,cbind(Cluster=channels[l],pro[[2]]))
+  }
+  if(nrow(kegg[[2]])>0){
+    all.kegg = rbind(all.kegg,cbind(Cluster=channels[l],kegg[[2]]))
+  }
+}
+
+# Prepare data for plotting
+all.go$Description = paste("(",all.go$ontology,") ",all.go$term,sep="")
+all.pro$Description = all.pro$category
+all.kegg$Description = all.kegg$category
+
+# More preparation
+colnames(all.kegg)[3] = colnames(all.pro)[3] = colnames(all.go)[3] = "pvalue"
+all.kegg$Description = gsub(" \\- Homo sapiens \\(human\\)","",all.kegg$Description)
+all.go$Cluster = factor(all.go$Cluster, levels = as.character(channels))
+
+# Plots
+ego = enricherPlot(all.go,"All-GO-U2OS-Label-free",N=3,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=8,x.size=8)
+epro = enricherPlot(all.pro,"All-Interpro-U2OS-Label-free",N=3,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=8,x.size=8)
+ego.cc = enricherPlot(all.go[which(all.go$ontology == "CC"),],"GO-Cellular-component-U2OS-Label-free",N=4,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=8,x.size=8)
+ego.mf = enricherPlot(all.go[which(all.go$ontology == "MF"),],"GO-Molecular-Function-U2OS-Label-free",N=4,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=8,x.size=8)
+ego.bp = enricherPlot(all.go[which(all.go$ontology == "BP"),],"GO-Biological-Process-U2OS-Label-free",N=4,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=8,x.size=8)
+ego.bp = enricherPlot(all.go[which(all.go$ontology == "BP"),],"GO-Biological-Process-U2OS-Label-free",N=3,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=8,x.size=8)
+ekegg = enricherPlot(all.kegg,"All-KEGG-U2OS-Label-free",N=15,colorBy = "neg.log10.BH",sizeBy ="foldEnrich",low.col="#E69F00",high.col="#999999",trunc.len=40,all.size=10,y.size=8,x.size=8)
+
+pdf(paste(outdir,paste(format(Sys.time(),"%Y-%m-%d_%H.%M.%S"),"Go-Interpro-enrichment-plots-for-U2OS-label-free-data.pdf",sep="_"),sep="/"),paper="a4r",width=12,height=8)
+print(ego)
+print(ego.cc)
+print(ego.mf)
+print(ego.bp)
+print(epro)
+print(ekegg)
+dev.off()
+
+# Re-order all.go and all.pro
+all.go[1:5,c(1:2,12,15,13,16,3,8:9,20,5:6,10:11,17)]
+all.go.1 = all.go[,c(1:2,12,15,13,16,3,8:9,20,5:6,10:11,17)]
+all.go.1$geneNames = sapply(all.go$geneID,function(x) paste(queryMany(strsplit(x,"/")[[1]],scopes="uniprot",fields = c("symbol"))$symbol,collapse="/"))
+all.pro[1:5,c(1:2,10,13,11,14,3,5:6,8:9,15)]
+all.pro.1 = all.pro[,c(1:2,10,13,11,14,3,5:6,8:9,15)]
+all.pro.1$geneNames = sapply(all.pro$geneID,function(x) paste(queryMany(strsplit(x,"/")[[1]],scopes="uniprot",fields = c("symbol"))$symbol,collapse="/"))
+all.kegg[1:5,c(1:2,10,13,11,14,3,5:6,8:9,15)]
+all.kegg.1 = all.kegg[,c(1:2,10,13,11,14,3,5:6,8:9,15)]
+all.kegg.1$geneNames = sapply(all.kegg$geneID,function(x) paste(queryMany(strsplit(x,"/")[[1]],scopes="uniprot",fields = c("symbol"))$symbol,collapse="/"))
+all.kegg.1$category = gsub(" \\- Homo sapiens \\(human\\)","",all.kegg.1$category)
+
+write.table(all.go.1,paste(outdir,"All-Enriched-GO-terms-U2OS-label-free.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(all.pro.1,paste(outdir,"All-Enriched-Interpro-U2OS-label-free.txt",sep="/"),sep="\t",row.names=F,quote=F)
+write.table(all.kegg.1,paste(outdir,"All-Enriched-KEGG-pathways-U2OS-label-free.txt",sep="/"),sep="\t",row.names=F,quote=F)
+
+
+head(all.go.1)[,1:13]
+head(all.pro.1)[,1:11]
+head(all.kegg.1)[,1:11]
+
+```
+

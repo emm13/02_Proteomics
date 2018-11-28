@@ -1,0 +1,419 @@
+---
+title: "First Latin LOPIT data for TTT study"
+output:
+  pdf_document: default
+  html_notebook: default
+  html_document: default
+---
+This is code to help analyse the first LOPIT data from the TTT study. It consists of 20 TMT-labelled samples - one from each of the fractions from the LOPIT experiment. Each fraction/sample was then analysed on the mass spectrometer and the data contains the peptides detected in the experiment. The 20 fractions were broken into 2 x 11-plex experiments where the 11th plex was a control sample that could be used to normalise between the two experiments and make the fractions 1-10 comparable to fractions 11-20. Thanks to Tom and Rayner, input data is available at https://github.com/ComputationalProteomicsUnit/ThreeTs/tree/master/proteomics/dLOPIT/pilot/data. 
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=12,fig.height=8,warning=FALSE, message=FALSE)
+```
+We will start off by calling on libraries required for the analysis and setting up working directories....
+
+```{r A_Startup, hide=T,warning=FALSE, message=FALSE}
+library(pRolocdata)
+library(MSnbase)
+library(gplots)
+library(reshape2)
+library(ggbiplot)
+library(org.Hs.eg.db)
+library("biomaRt")
+library(goseq)
+library(limma)
+library(ggplot2)
+library(RColorBrewer)
+library(zoo)
+
+#Setting working directories
+wd = "/Users/manasa/Documents/Work/TTT/02_Proteomics/04_First-Latin-LOPIT/"
+setwd(wd)
+getwd()
+
+indir = paste(wd,"Input",sep="/")
+outdir = paste(wd,paste(Sys.Date(),"Output",sep = "_"),sep = "/")
+
+if (exists(outdir)){
+  print("Outdir exists")
+}else{
+  dir.create(outdir)
+}
+```
+
+Having established working directories, it is time to read in the data that is to be analysed. We will have peptide abundance values from the two 11-plex experiments, file(s) telling us which sample/fraction is which TMT tag as well as Katerina and Claire's list of markers for various cellular components. In addition, we will still keep the contaminants file to remove known mass spectrometry contaminants.
+
+Now that we have loaded all the packages we need for working with this data, let's move on to the data. 
+
+```{r 01_ReadingData}
+
+# -----------------------------------------------
+# Step 01: Read data
+# Read in all the data required for analysis
+# -----------------------------------------------
+
+# File of contaminants - proteins to exclude from analysis as are things like keratin, alcohol dehydrogenase etc....
+contam = read.delim("Input/Common contaminant_all.csv",sep=",",header=T)
+
+# Read in the data files that contain peptide level output from Proteome discoverer...
+# Note: The columns that begin with "Found.in.Sample.in" correspond to various samples in the study.
+# Columns of interest are "sequence", "modifications","master.protein.accessions","abundance","quan.info"
+raw.data = read.table("Input/dLOPIT_22plex_PeptideGroups_reannot.txt",sep="\t",comment.char="",as.is=T,header=T)
+head(raw.data)
+dim(raw.data)
+
+# Create a sample data file based on input
+samp.names = grep("Abundance",colnames(raw.data),value=T)
+
+samp.dat = as.data.frame(cbind(samp.names,sapply(strsplit(samp.names,"\\."),"[[",3),sapply(strsplit(samp.names,"\\."),"[[",2)))
+rownames(samp.dat) = samp.dat$samp.names
+colnames(samp.dat)[2:3] = c("TMT","Exp")
+samp.dat$Rep = rep(c(2,1),each=11)
+samp.dat$Order = c(seq(12,22),seq(1,11))
+samp.dat = samp.dat[order(samp.dat$Order),]
+samp.dat$Name = paste(samp.dat$TMT,samp.dat$Rep,sep=".")
+
+# Read in the file containing Claire and Katerina's classifications
+cell.markers = read.delim("Input/markers_claire_kat.tsv",sep="\t",header=F,stringsAsFactors = F)
+colnames(cell.markers) = c("Protein","Location")
+rownames(cell.markers) = cell.markers$Protein
+cell.markers = cell.markers[,2:1]
+
+```
+
+Data has 89 columns and 50140 rows - each row belonging to a peptide abundance value across one or more of 22 samples. We now go through a series of filtering steps to obtain a dataset we can use for downstream analyses. 
+
+
+```{r 02_Filtering}
+
+# ---------------------------------------------------------------------------------
+# Step 02 : Filter 
+# We perform 2 layers of filtering - for unique proteins, to remove contaminants
+# ---------------------------------------------------------------------------------
+
+# Filter 1a : Filter only for those peptides that have a unique master protein. Done using column "quan.info" and titled 'Unique'
+peptide.stats = table(raw.data$Quan.Info)
+peptide.stats
+
+# Keep only those peptides that map uniquely to a protein and not to multiple proteins
+filt.1a = raw.data[which(raw.data$Quan.Info == "Unique"),]
+dim(filt.1a) # 46047 are unique peptides, 2801 are non-unique and 1292 are missing values 
+
+# Filter 1b : Filter out those proteins that are contaminants from the contaminants list and annotate missing values
+# Have used Tom's reannotated file for this where the SwissProt only Master proteins are in the column "master_protein"
+filt.1b = filt.1a[-which(filt.1a$master_protein %in% contam$Protein.Group.Accessions),]
+num.contams = length(which(filt.1a$Master.Protein.Accessions %in% contam$Protein.Group.Accessions))
+dim(filt.1b) # 45694 filtered proteins
+print(num.contams) # 353 contaminant proteins
+
+# Adding extra information about rows with missing values
+filt.1b$count.missing = rowSums(is.na(filt.1b[,c(59:68,70:79)]))
+filt.1b$missing.1.to.10 = rowSums(is.na(filt.1b[,c(59:68)]))
+filt.1b$missing.12.to.21 = rowSums(is.na(filt.1b[,c(70:79)]))
+
+# Indicating which rows contain missing values
+filt.1b$Missing = FALSE
+filt.1b$Missing[which(filt.1b$count.missing > 0)] = TRUE
+
+# Some data stats
+head(filt.1b)
+table(filt.1b$count.missing)
+table(filt.1b$missing.1.to.10) # 11794 peptides missing abundances in the first set of fractions
+table(filt.1b$missing.12.to.21) # 20458 peptides missing abundances in the second set of fractions
+
+# Looking at missing values using the 11th plex in both TMT experiments which is meant to normalise 
+plot(log2(filt.1b[,69]),log2(filt.1b[,80]),xlab="Log2 expression for 11th-plex,Fractions:1-10",ylab="Log2 expression for 11th-plex,Fractions:12-21")
+abline(lm(log2(filt.1b[,69]) ~ log2(filt.1b[,80])), col="blue",pch=3)
+
+# Checking how many unique proteins intersect with the cellular markers provided by C&K
+length(intersect(unique(filt.1b$master_protein),cell.markers$Protein)) # 691
+which(filt.1b$count.missing == 20)
+
+# Final level of filtering is removing rows for which there is no value in any of the fractions
+# In addition, we remove any peptides which have a "master_protein" that is blank. This hasn't reduced mappable markers.
+filt.1c = filt.1b[-which(filt.1b$count.missing == 20 | filt.1b$master_protein == ""),] # 40999 99
+length(intersect(unique(filt.1c$Master.Protein.Accessions),cell.markers$Protein)) #691
+
+nrow(raw.data)
+nrow(filt.1a)
+nrow(filt.1b)
+nrow(filt.1c)
+
+#
+
+```
+As we can see from the table above, there area LOT of missing values. In fact, there are more missing values (40963) than not(4731), at least at the peptide level. Of these, a large number are missing in 11 or more samples (32246). 
+
+This isn't unexpected because the 20 fractions are across the elution through the liquid chromatography column. Fractions 1-3 will have barely any proteins and the detections will usually start around fraction 4. Additionally, fractions 1-10 capture proteins from one set of cellular components while 12-21 from a different set of cellular components. 
+
+Therefore, I have made two additional missing count columns.....Missing.1.to.10 and Missing.12.to.21. Given the two sets of fractions represent two separate sets of cellular components, we would loose a lot of information if we only kept the overlapping set. 
+
+I also plotted the 11th-plex for both TMT experiments against each other. As you can see in the plot, there are clouds of points with low or no expression in one of the TMT-experiments. For the others, the second set of fractions (12-21) has higher values than the first set of fractions
+
+```{r 03_Creating-an-MSnSet}
+
+# -----------------------------------------------------------------------------------------
+# Step 03 : Creating an MSnSet which is needed for using the MSnbase/pRolocdata packages
+# -----------------------------------------------------------------------------------------
+
+# Create an MSnSet object with all samples
+
+# Subsetting data and metadata instances
+all.data = as.matrix(filt.1c[,c(70:80,59:69)])
+colnames(all.data) = samp.dat$Name
+
+# Peptide information
+metadata = filt.1c[,c(10,1:9,81,90:93)]
+
+# Sample information
+rownames(samp.dat) = samp.dat$Name
+
+# Creating MSnSet instances
+res <- MSnSet(exprs = all.data,fData=metadata,pData = samp.dat)
+
+# How many missing values per peptide
+table(fData(res)$count.missing)
+colSums(is.na(exprs(res)))
+table(rowSums(is.na(exprs(res))))
+
+```
+
+I have created one master MSnSet containing all 22 plexes/fractions/samples. However, I have made separate ones for each experiment as it might be hard to compare them otherwise and we would loose a lot of data as discussed in the previous section. The only downside is whether or not we will be able to pick up proteins based on their profiles if they are missing in one set of fractions and not the other. 
+
+Looking at the numbers of missing values, there are several rows (20220) which are missing 10 fractions which is indicative of the fact that they only worked in one of the two 10-plexes. This isn't unexpected because we expect the various cellular components to separate along the fractions. 
+
+```{r 04_Assessing-missing-values}
+# ---------------------------------------------------------------------------------
+# Step 04 : Looking at missing values and assessing if we can impute them
+# ---------------------------------------------------------------------------------
+
+# Subsetting only those peptides with one or more missing values
+# Replacing missing values with 0 and non-missing with 1
+# Displaying a subset of missing values (1000-2000) as R crashes if I attempt to draw all 40,000
+
+miss.many = res[rowSums(is.na(exprs(res)))>=1,]
+exprs(miss.many)[exprs(miss.many) != 0] = 1
+exprs(miss.many)[is.na(exprs(miss.many))] = 0
+
+heatmap.2(exprs(miss.many)[1000:2000,], col = c("lightgray", "black"),scale = "none", dendrogram = "none",trace = "none", keysize = 0.5, key = FALSE,Colv=F,ColSideColors = rep(c("steelblue", "darkolivegreen","magenta","black"), times = c(10,1,10,1)))
+
+# Melt expression values
+res.miss = melt(exprs(res))
+colnames(res.miss) = c("Row","Dosage","Abundance_imp")
+
+# Draw boxplots of the data
+boxplot(log2(res.miss$Abundance+0.1)~as.factor(res.miss$Dosage),las=2,col=rep(c("turquoise", "salmon","palegreen","plum1"),times=c(10,1,10,1)),main="All data including missing values")
+
+```
+Since there are >20,000 missing values in the second TMT experiment and >10,000 missing values in the first, we won't be imputing any values here as there isn't information to impute from. The box plots show a lot more variability in the first TMT experiment containing fractions 1-10 than in the second.
+
+We will impute further downstream to make sure drawing PCA plots etc doesn't fail. 
+
+```{r 05_Normalisation}
+
+# ---------------------------------------------------------------------------------
+# Step 05 : Normalising imputed data using various methods to determine ideal one
+# ---------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------
+# Function  : .plot 
+# Aim       : Draws boxplots with certain inbuilt parameters
+# Input     : MSnset object
+# Output    : Boxplot of exprs(MSnset object)
+# ------------------------------------------------------------------------
+.plot <- function(x,ttl=NULL) {
+  boxplot(log2(exprs(x)+0.1),
+          main=ifelse(is.null(ttl),processingData(x)@processing[2],ttl),
+          cex.main=1.5,
+          cex.lab=.5,
+          cex.axis=0.8,
+          cex=.8,
+          las=2)
+  grid()
+}
+
+qnt.max <- normalise(res, "max")
+qnt.sum <- normalise(res, "sum")
+qnt.quant <- normalise(res, "quantiles")
+qnt.qrob <- normalise(res, "quantiles.robust")
+qnt.vsn <- normalise(res, "vsn")
+
+# Using the plotting function to plot boxplots for all diff types of normalisation methods
+oldmar <- par()$mar
+par(mfrow=c(3,2),mar=c(2.9,2.9,2.9,1))
+.plot(res, ttl = "Non-normalised data")
+.plot(qnt.max, ttl = "Maximum")
+.plot(qnt.sum, ttl = "Sum")
+.plot(qnt.quant, ttl = "Quantile")
+.plot(qnt.qrob, ttl = "Robust quantile")
+.plot(qnt.vsn, ttl = "vsn")
+
+```
+Given the nature of the data, we will not be using any form of normalisation. We expect to see peaks and troughs across the fractions and normalisation will remove this information. Hence, we will keep it as is. 
+
+However, since we have data from two different 10-plex experiments, to compare them, we will divide each 10-plex by the value of its cell lysate so fractions across the two.
+
+```{r 06_Aggregate-to-proteins}
+
+# ---------------------------------------------------------------------------------
+# Step 06 : Aggregate peptide data to protein expression values
+# There is an in-built function called 'combineFeatures' to do thi within MSnBase
+# ---------------------------------------------------------------------------------
+
+
+#-------------------------------------------------------------------------------------------
+# Function  : aggPep
+# Aim       : Aggregate peptides into proteins, plots samples
+# Input     : 'res' or any other MSnSet object which contains peptide abundances
+# Output    : qnt.prot, another MSnSet object that contains proteins abundances
+#-------------------------------------------------------------------------------------------
+
+aggPep <- function(res){
+  
+  pep.res<- fData(res)$Sequence
+  print("Count of 0s in raw data")
+  table(rowSums(exprs(res)==0))
+  
+  # Aggregating peptides into peptide groups
+  qnt.pep<- combineFeatures(res, groupBy = pep.res, fun = "sum",cv.norm="none",cv=F,na.rm = TRUE)
+  print("Count of 0s in aggregated peptide groups data")
+  table(rowSums(exprs(qnt.pep)==0))
+  dim(qnt.pep) # 41944 peptide groups from 45620 peptides
+  
+  # Aggregating peptide abundance values into protein abundance values
+  prot.res<- fData(qnt.pep)$Master.Protein.Accessions
+  qnt.prot <- combineFeatures(qnt.pep, groupBy = prot.res, fun = "median",na.rm = TRUE)
+  dim(qnt.prot) # 7074 proteins from 41944 peptide groups
+  print("Count of 0s in aggregated protein data")
+  table(rowSums(exprs(qnt.prot)==0))
+  
+  # Adding phenodata back to the MSnSet as aggregation loses it.
+  pData(qnt.prot) = samp.dat
+  
+  # Add cellular markers to data
+  library(pRoloc)
+  qnt.prot = addMarkers(qnt.prot,cell.markers) # 691 out of 7074 had markers
+  print(paste("The number of mappable cellular markers in this dataset are " ,length(which(fData(qnt.prot)$markers != "unknown")),sep=""))
+  
+  # Removing all rows with complete sets of missing values
+  tmp = qnt.prot[which(exprs(qnt.prot)[,"131C.1"] != 0 & exprs(qnt.prot)[,"131C.2"]!= 0),]
+  print(paste("The number of mappable cellular markers in the filtered dataset are " ,length(which(fData(tmp)$markers != "unknown")),sep="")) # 307 so we lose over 50% of marker proteins
+  
+  return(tmp)
+}
+
+
+#----------------------------------------------
+
+# Perform protein aggregation
+agg.prot = aggPep(res)
+saveRDS(agg.prot, file="aggregated.proteins.Rds")
+agg.prot2 = readRDS("aggregated.proteins.Rds")
+
+# Size of aggregated protein dataset 
+dim(agg.prot) # 1918 22
+
+# Basic plots of protein data across samples
+.plot(agg.prot,ttl="Aggregated-proteins")
+
+## Draw PCAs
+prot.pca = prcomp(t(exprs(agg.prot)), center = TRUE, scale = TRUE)
+gp = sapply(strsplit(colnames(agg.prot),"\\."),"[[",2)
+j <- ggbiplot(prot.pca, var.axes=F, groups = gp, circle = T,obs.scale=1,labels=rownames(prot.pca$x))
+print(j)
+
+# Looking at sample correlations
+cor.prot = cor(exprs(agg.prot),use='complete.obs')
+heatmap(cor.prot,cex.main = 0.8)
+
+# Then normalise
+norm.res = agg.prot
+exprs(norm.res)[,1:11] = exprs(norm.res)[,1:11]/exprs(norm.res)[,11]
+exprs(norm.res)[,12:22] = exprs(norm.res)[,12:22]/exprs(norm.res)[,22]
+norm.res.imp = impute(norm.res,method="min")
+norm.res.imp = norm.res.imp[,c(1:10,12:21)]
+
+```
+
+There should be two levels of aggregation - one peptides into peptide groups irrespective of their chemical modification. Then peptide groups into proteins. I'd forgotten peptide group aggregation so will add this. 31.8.2017
+
+In the above step, we aggregated peptide abundance values into peptide groups using "sum" and then into protein abundance values using "sum" as a way of aggregation. In addition, we also looked at the correlation between various samples (we don't expect it to be high as each fraction is different). 
+
+We added cellular markers to this dataset to retain as much informaiton as possible. There were 691 proteins which could be annotated with markers. 
+
+Given there are still a lot of missing values, we first removed those hese are values where the total cell lysate has no proteins. Given the total cell lysate should have more than each fraction, if the total is 0, it is highly likely that the fractions for that experiment are 0 too. 
+
+I have then imputed the missing data to be the smallest possible value. Following imputation, the data has been normalised so that they are comparable between the two plexes. 
+
+```{r 08_Plotting-marker-profiles}
+#---------------------------------------------------------
+# Modifying function 'plotDist'
+#---------------------------------------------------------
+plotDist.m <- function (object, markers, mcol = "steelblue", pcol = getUnknowncol(), 
+    alpha = 0.3, type = "b", lty = 1, fractions = sampleNames(object), 
+    ylab = "Intensity", xlab = "Fractions", ylim, ...) 
+{
+    library(pRoloc)
+    .data <- exprs(object)
+    if (missing(ylim)) 
+        ylim <- range(.data)
+    n <- nrow(.data)
+    m <- ncol(.data)
+    if (!missing(fractions)) {
+        if (sum(fractions %in% names(pData(object))) != 1) 
+            stop("'fractions' must be a single pData name.")
+        fractions <- as.character(pData(object)[, fractions])
+    }
+    plot(0, ylim = ylim, xlim = c(1, m), xlab = xlab, ylab = ylab, 
+        type = "n", xaxt = "n")
+    axis(1, at = seq_len(m), labels = fractions,las=2) # made labels sideways
+    pcol <- col2hcl(pcol, alpha = alpha)
+    matlines(t(.data), lty = "solid", col = pcol)
+    if (!missing(markers)) {
+        mcol <- col2hcl(mcol)
+        .mrk <- exprs(object[markers, ])
+        matlines(t(.mrk), col = mcol, type = type, lty = lty, 
+            ...)
+    }
+    invisible(t(.data))
+}
+
+#---------------------------------------------------------
+# Drawing profile plots for each marker
+#---------------------------------------------------------
+par(mfrow=c(1,1))
+for(j in sort(unique(fData(norm.res.imp)$markers))){
+  if(j != "unknown"){
+    i <- which(fData(norm.res.imp)$markers == j)
+    plotDist.m(norm.res.imp[i,],markers = featureNames(norm.res.imp)[i])
+    title(main=j)
+  }
+  else{
+    print("Unknown")
+  }
+}
+
+```
+Blah blah
+```{r 07_Plotting-positional-maps }
+
+# ------------------------------------------------------------------------------------
+# Step 07 : Working out where the proteins in our list are expressed based on markers
+# ------------------------------------------------------------------------------------
+
+#---------------------------------------------------------
+# Plotting spatial graphs of the data
+#---------------------------------------------------------
+plot2D(norm.res.imp,dims = c(1,2))
+addLegend(norm.res.imp,where="topleft",ncol=2,cex=0.8)
+
+plot2D(norm.res.imp[,1:10],dims = c(1,2))
+addLegend(data,where="topleft",ncol=2,cex=0.8)
+
+plot2D(norm.res.imp[,11:20],dims = c(1,2))
+addLegend(data,where="topleft",ncol=2,cex=0.8)
+
+```
+Checking where the error is
+
+
